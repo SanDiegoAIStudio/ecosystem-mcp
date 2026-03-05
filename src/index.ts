@@ -29,6 +29,9 @@ import {
   checkSecurity,
   analyzePackageJson,
   getTrending,
+  deepSearch,
+  research,
+  SCHEMAS,
 } from "./tools/index.js";
 
 // =============================================================================
@@ -159,6 +162,108 @@ Use this to audit a project's dependencies.`,
     },
   },
   {
+    name: "exa_deep_search",
+    description: `Agentic deep search using Exa Deep. Conducts multi-step research with query expansion,
+parallel search agents, and LLM synthesis. Returns structured results with field-level citations.
+
+Use "deep" (4-12s) for fast synthesis. Use "deep-reasoning" (12-50s) for complex multi-step research.
+
+Supports outputSchema for structured JSON responses with grounding citations.
+Requires EXA_API_KEY environment variable.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural language research query",
+        },
+        type: {
+          type: "string",
+          enum: ["deep", "deep-reasoning"],
+          description: "Search depth: 'deep' (fast) or 'deep-reasoning' (thorough)",
+          default: "deep",
+        },
+        outputSchema: {
+          type: "object",
+          description: "Optional JSON Schema for structured output. Deep will return data matching this schema with field-level citations.",
+        },
+        preset: {
+          type: "string",
+          enum: [
+            "companyProfile",
+            "preCallBriefing",
+            "competitiveLandscape",
+            "meetingPrep",
+            "strategicPath",
+            "freelanceOpportunity",
+            "siteProfile",
+            "topicEnrichment",
+            "marketScan",
+          ],
+          description: "Use a preset output schema instead of providing a custom one",
+        },
+        numResults: {
+          type: "number",
+          description: "Number of source results (default: 10)",
+        },
+        includeDomains: {
+          type: "array",
+          items: { type: "string" },
+          description: "Restrict search to these domains",
+        },
+        category: {
+          type: "string",
+          enum: ["research paper", "news", "tweet", "company", "people", "github", "linkedin", "pdf"],
+          description: "Filter to specific content category",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "exa_research",
+    description: `Submit an async deep research task to Exa Research API. For research that needs minutes
+of deep investigation (45-180s). Returns structured results with citations.
+
+Use exa-research (faster, cheaper) or exa-research-pro (more thorough).
+Polls until completion and returns the final result.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        instructions: {
+          type: "string",
+          description: "Natural language research instructions (max 4096 chars)",
+        },
+        outputSchema: {
+          type: "object",
+          description: "Optional JSON Schema for structured output (max 8 root fields, 5 levels deep)",
+        },
+        preset: {
+          type: "string",
+          enum: [
+            "companyProfile",
+            "preCallBriefing",
+            "competitiveLandscape",
+            "meetingPrep",
+            "strategicPath",
+            "freelanceOpportunity",
+            "siteProfile",
+            "topicEnrichment",
+            "marketScan",
+          ],
+          description: "Use a preset output schema",
+        },
+        model: {
+          type: "string",
+          enum: ["exa-research", "exa-research-pro"],
+          description: "Research model (default: exa-research)",
+          default: "exa-research",
+        },
+      },
+      required: ["instructions"],
+    },
+  },
+  {
     name: "get_trending",
     description: `Get trending/popular packages in a category. Returns:
 - Top packages by downloads
@@ -255,6 +360,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           args?.checkDevDeps as boolean | undefined
         );
         break;
+
+      case "exa_deep_search": {
+        const schema = args?.preset
+          ? SCHEMAS[args.preset as keyof typeof SCHEMAS]
+          : (args?.outputSchema as Record<string, unknown> | undefined);
+        result = await deepSearch(
+          args?.query as string,
+          schema,
+          {
+            type: (args?.type as "deep" | "deep-reasoning") ?? "deep",
+            numResults: args?.numResults as number | undefined,
+            includeDomains: args?.includeDomains as string[] | undefined,
+            category: args?.category as "news" | "company" | "people" | undefined,
+          }
+        );
+        break;
+      }
+
+      case "exa_research": {
+        const researchSchema = args?.preset
+          ? SCHEMAS[args.preset as keyof typeof SCHEMAS]
+          : (args?.outputSchema as Record<string, unknown> | undefined);
+        result = await research(
+          args?.instructions as string,
+          researchSchema,
+          (args?.model as "exa-research" | "exa-research-pro") ?? "exa-research"
+        );
+        break;
+      }
 
       case "get_trending":
         result = await getTrending(
