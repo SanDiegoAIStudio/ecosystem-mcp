@@ -42,6 +42,22 @@ export interface SecurityAdvisory {
   url?: string;
 }
 
+function normalizeSeverity(value: string | undefined): SecurityAdvisory["severity"] {
+  switch (value?.toLowerCase()) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "medium":
+    case "moderate":
+      return "moderate";
+    case "low":
+      return "low";
+    default:
+      return "moderate";
+  }
+}
+
 export async function checkSecurityAdvisories(
   packageName: string,
   version?: string
@@ -87,7 +103,7 @@ export async function checkSecurityAdvisories(
 
         advisories.push({
           id: advisory.ghsa_id || advisory.id,
-          severity: (advisory.severity?.toLowerCase() || "moderate") as SecurityAdvisory["severity"],
+          severity: normalizeSeverity(advisory.severity),
           title: advisory.summary || advisory.title || "Unknown vulnerability",
           description: advisory.description,
           cve: advisory.cve_id,
@@ -102,6 +118,7 @@ export async function checkSecurityAdvisories(
         ?.split(",")
         .find((link) => /;\s*rel="next"/.test(link))
         ?.match(/<([^>]+)>/)?.[1];
+      if (!url?.startsWith("https://api.github.com/")) url = undefined;
     }
   } catch (error) {
     if (error instanceof AdvisoryLookupError) throw error;

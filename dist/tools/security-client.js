@@ -10,6 +10,21 @@ export class AdvisoryLookupError extends Error {
         this.name = "AdvisoryLookupError";
     }
 }
+function normalizeSeverity(value) {
+    switch (value?.toLowerCase()) {
+        case "critical":
+            return "critical";
+        case "high":
+            return "high";
+        case "medium":
+        case "moderate":
+            return "moderate";
+        case "low":
+            return "low";
+        default:
+            return "moderate";
+    }
+}
 export async function checkSecurityAdvisories(packageName, version) {
     const advisories = [];
     // Check GitHub Security Advisories
@@ -39,7 +54,7 @@ export async function checkSecurityAdvisories(packageName, version) {
                     continue;
                 advisories.push({
                     id: advisory.ghsa_id || advisory.id,
-                    severity: (advisory.severity?.toLowerCase() || "moderate"),
+                    severity: normalizeSeverity(advisory.severity),
                     title: advisory.summary || advisory.title || "Unknown vulnerability",
                     description: advisory.description,
                     cve: advisory.cve_id,
@@ -53,6 +68,8 @@ export async function checkSecurityAdvisories(packageName, version) {
                 ?.split(",")
                 .find((link) => /;\s*rel="next"/.test(link))
                 ?.match(/<([^>]+)>/)?.[1];
+            if (!url?.startsWith("https://api.github.com/"))
+                url = undefined;
         }
     }
     catch (error) {

@@ -206,6 +206,22 @@ test("check_security propagates advisory lookup failures", async () => {
   expect(error).toMatchObject({ message: "GitHub advisory lookup failed for lodash: HTTP 403" });
 });
 
+test("check_security counts medium and unknown advisories as moderate", async () => {
+  // source: GitHub medium and unknown severities fell out of check_security severity counts.
+  mockFetch({
+    ...registryFixtures("lodash", "4.17.21"),
+    [lodashUrl]: {
+      body: ["medium", "high", "unknown"].map((severity) => ({
+        ...advisory(`GHSA-${severity}`),
+        severity,
+      })),
+    },
+  });
+
+  const result = await checkSecurity("lodash");
+  expect(result.bySeverity).toEqual({ critical: 0, high: 1, moderate: 2, low: 0 });
+});
+
 test("advisory pagination follows the next link", async () => {
   // source: Advisory lookups must include advisories beyond the first page.
   const nextUrl = `${lodashUrl}&page=2`;
@@ -224,6 +240,23 @@ test("advisory pagination follows the next link", async () => {
     .toEqual(["GHSA-first", "GHSA-second"]);
   expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([lodashUrl, nextUrl]);
   expect(fetchMock.mock.calls[1][1]).toEqual(fetchMock.mock.calls[0][1]);
+});
+
+test("advisory pagination ignores next links outside the GitHub API", async () => {
+  // source: Pagination sent the GitHub token to arbitrary URLs in the Link header.
+  const nextUrl = "https://example.invalid/advisories?page=2";
+  const fetchMock = mockFetch({
+    [lodashUrl]: {
+      body: [advisory("GHSA-first")],
+      headers: { Link: `<${nextUrl}>; rel="next"` },
+    },
+    [nextUrl]: { body: [advisory("GHSA-second")] },
+  });
+
+  expect((await checkSecurityAdvisories("lodash")).map((item) => item.id))
+    .toEqual(["GHSA-first"]);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(fetchMock.mock.calls[0][0]).toBe(lodashUrl);
 });
 
 test("advisory pagination stops after ten pages", async () => {
