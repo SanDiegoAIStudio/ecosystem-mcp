@@ -294,13 +294,32 @@ test("check_security includes the latest version in its result and recommendatio
   expect(result.recommendation).toBe('No known security advisories for "lodash" 4.17.20. Latest version: 4.17.21');
 });
 
+test("dependency analysis filters advisories by valid dependency versions", async () => {
+  // source: review, dependency analysis counted advisories for every version of a package
+  const otherUrl = "https://api.github.com/advisories?ecosystem=npm&per_page=100&affects=other";
+  const fetchMock = mockFetch({
+    ...registryFixtures("lodash", "4.17.21"),
+    ...registryFixtures("other", "1.0.0"),
+    [`${lodashUrl}%404.17.20`]: { body: [] },
+    [otherUrl]: { body: [] },
+  });
+
+  await analyzePackageJson({ dependencies: { lodash: "4.17.20", other: "latest" } });
+  const urls = fetchMock.mock.calls.map(([url]) => String(url));
+  const lodashRequest = urls.find((url) => url.startsWith(lodashUrl));
+  const otherRequest = urls.find((url) => url.startsWith(otherUrl));
+  expect(lodashRequest).toContain("affects=lodash%404.17.20");
+  expect(otherRequest).toContain("affects=other");
+  expect(otherRequest).not.toContain("%40");
+});
+
 test("dependency analysis detects patch and major updates from dist-tags", async () => {
   // source: Missing latest versions made every dependency appear up to date.
   mockFetch({
     ...registryFixtures("lodash", "4.17.21"),
     ...registryFixtures("zod", "4.1.0"),
-    [lodashUrl]: { body: [] },
-    [zodUrl]: { body: [] },
+    [`${lodashUrl}%404.17.20`]: { body: [] },
+    [`${zodUrl}%403.0.0`]: { body: [] },
   });
 
   const result = await analyzePackageJson({ dependencies: { lodash: "4.17.20", zod: "^3.0.0" } });
@@ -319,9 +338,9 @@ test("dependency analysis records and counts failed security lookups", async () 
     ...registryFixtures("zod", "4.1.0"),
     ...registryFixtures("missing", "1.0.0"),
     "https://registry.npmjs.org/missing": { status: 404, body: {} },
-    [lodashUrl]: { status: 403, body: {} },
-    [zodUrl]: { body: [] },
-    "https://api.github.com/advisories?ecosystem=npm&per_page=100&affects=missing": { status: 403, body: {} },
+    [`${lodashUrl}%404.17.20`]: { status: 403, body: {} },
+    [`${zodUrl}%403.0.0`]: { body: [] },
+    "https://api.github.com/advisories?ecosystem=npm&per_page=100&affects=missing%401.0.0": { status: 403, body: {} },
   });
 
   const result = await analyzePackageJson({

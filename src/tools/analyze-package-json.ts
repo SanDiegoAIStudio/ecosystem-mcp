@@ -34,18 +34,18 @@ async function analyzeDependency(
   versionSpec: string
 ): Promise<DependencyAnalysis> {
   let securityError: string | undefined;
+  // Parse current version from spec (remove ^, ~, etc.)
+  const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
+
   const [npmData, downloads, advisories] = await Promise.all([
     fetchPackageData(name),
     fetchDownloads(name, "last-week"),
-    checkSecurityAdvisories(name).catch((error: unknown) => {
+    checkSecurityAdvisories(name, semver.valid(currentVersion) ? currentVersion : undefined).catch((error: unknown) => {
       if (!(error instanceof AdvisoryLookupError)) throw error;
       securityError = error.message;
       return [];
     }),
   ]);
-
-  // Parse current version from spec (remove ^, ~, etc.)
-  const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
 
   if (!npmData) {
     return {

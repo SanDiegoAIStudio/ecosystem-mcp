@@ -8,18 +8,18 @@ import { fetchPackageData, fetchDownloads } from "./npm-client.js";
 import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
 async function analyzeDependency(name, versionSpec) {
     let securityError;
+    // Parse current version from spec (remove ^, ~, etc.)
+    const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
     const [npmData, downloads, advisories] = await Promise.all([
         fetchPackageData(name),
         fetchDownloads(name, "last-week"),
-        checkSecurityAdvisories(name).catch((error) => {
+        checkSecurityAdvisories(name, semver.valid(currentVersion) ? currentVersion : undefined).catch((error) => {
             if (!(error instanceof AdvisoryLookupError))
                 throw error;
             securityError = error.message;
             return [];
         }),
     ]);
-    // Parse current version from spec (remove ^, ~, etc.)
-    const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
     if (!npmData) {
         return {
             name,
