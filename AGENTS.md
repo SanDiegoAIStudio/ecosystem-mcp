@@ -9,7 +9,7 @@ bun install
 bun run build
 bun run dev
 bun run start
-bunx @anthropic-ai/mcp-inspector tsx src/index.ts
+bunx @modelcontextprotocol/inspector node dist/index.js
 ```
 
 ## Rules
