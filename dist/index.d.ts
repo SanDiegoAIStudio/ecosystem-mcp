@@ -11,6 +11,8 @@
  * - find_alternatives: Find alternatives to a package
  * - check_security: Check for security advisories
  * - analyze_package_json: Analyze a project's dependencies
+ * - exa_deep_search: Web research through Exa Deep search
+ * - exa_research: Longer research task through the Exa Research API
  * - get_trending: Get trending packages in a category
  */
 export {};
