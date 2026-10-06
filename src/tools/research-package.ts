@@ -7,7 +7,7 @@
 import semver from "semver";
 import { fetchPackageData, fetchDownloads } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
-import { checkSecurityAdvisories } from "./security-client.js";
+import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
 
 export interface PackageResearch {
   name: string;
@@ -28,6 +28,7 @@ export interface PackageResearch {
     advisoryCount: number;
     criticalCount: number;
     highCount: number;
+    error?: string;
     advisories: Array<{
       id: string;
       severity: string;
@@ -49,13 +50,18 @@ export async function researchPackage(
   packageName: string,
   currentVersion?: string
 ): Promise<PackageResearch> {
+  let securityError: string | undefined;
   // Fetch data in parallel
   const [npmData, weeklyDownloads, monthlyDownloads, advisories] =
     await Promise.all([
       fetchPackageData(packageName),
       fetchDownloads(packageName, "last-week"),
       fetchDownloads(packageName, "last-month"),
-      checkSecurityAdvisories(packageName, currentVersion),
+      checkSecurityAdvisories(packageName, currentVersion).catch((error: unknown) => {
+        if (!(error instanceof AdvisoryLookupError)) throw error;
+        securityError = error.message;
+        return [];
+      }),
     ]);
 
   if (!npmData) {
@@ -128,6 +134,7 @@ export async function researchPackage(
       advisoryCount: advisories.length,
       criticalCount,
       highCount,
+      error: securityError,
       advisories: advisories.slice(0, 5).map((a) => ({
         id: a.id,
         severity: a.severity,

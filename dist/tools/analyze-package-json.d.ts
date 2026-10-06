@@ -9,6 +9,7 @@ export interface DependencyAnalysis {
     latest?: string;
     status: "up-to-date" | "patch" | "minor" | "major" | "unknown";
     securityIssues: number;
+    securityError?: string;
     weeklyDownloads?: number;
     recommendation?: string;
 }

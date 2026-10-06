@@ -6,14 +6,20 @@
 import semver from "semver";
 import { fetchPackageData, fetchDownloads } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
-import { checkSecurityAdvisories } from "./security-client.js";
+import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
 export async function researchPackage(packageName, currentVersion) {
+    let securityError;
     // Fetch data in parallel
     const [npmData, weeklyDownloads, monthlyDownloads, advisories] = await Promise.all([
         fetchPackageData(packageName),
         fetchDownloads(packageName, "last-week"),
         fetchDownloads(packageName, "last-month"),
-        checkSecurityAdvisories(packageName, currentVersion),
+        checkSecurityAdvisories(packageName, currentVersion).catch((error) => {
+            if (!(error instanceof AdvisoryLookupError))
+                throw error;
+            securityError = error.message;
+            return [];
+        }),
     ]);
     if (!npmData) {
         throw new Error(`Package "${packageName}" not found on npm`);
@@ -70,6 +76,7 @@ export async function researchPackage(packageName, currentVersion) {
             advisoryCount: advisories.length,
             criticalCount,
             highCount,
+            error: securityError,
             advisories: advisories.slice(0, 5).map((a) => ({
                 id: a.id,
                 severity: a.severity,

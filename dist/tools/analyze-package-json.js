@@ -5,12 +5,18 @@
  */
 import semver from "semver";
 import { fetchPackageData, fetchDownloads } from "./npm-client.js";
-import { checkSecurityAdvisories } from "./security-client.js";
+import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
 async function analyzeDependency(name, versionSpec) {
+    let securityError;
     const [npmData, downloads, advisories] = await Promise.all([
         fetchPackageData(name),
         fetchDownloads(name, "last-week"),
-        checkSecurityAdvisories(name),
+        checkSecurityAdvisories(name).catch((error) => {
+            if (!(error instanceof AdvisoryLookupError))
+                throw error;
+            securityError = error.message;
+            return [];
+        }),
     ]);
     // Parse current version from spec (remove ^, ~, etc.)
     const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
@@ -20,6 +26,7 @@ async function analyzeDependency(name, versionSpec) {
             current: currentVersion,
             status: "unknown",
             securityIssues: advisories.length,
+            securityError,
             recommendation: "Package not found on npm",
         };
     }
@@ -52,6 +59,7 @@ async function analyzeDependency(name, versionSpec) {
         latest: npmData.version,
         status,
         securityIssues: advisories.length,
+        securityError,
         weeklyDownloads: downloads?.downloads,
         recommendation,
     };
@@ -74,6 +82,7 @@ export async function analyzePackageJson(packageJson, checkDevDeps = true) {
     const allResults = [...depResults, ...devDepResults];
     const outdatedCount = allResults.filter((r) => r.status !== "up-to-date" && r.status !== "unknown").length;
     const securityIssueCount = allResults.reduce((sum, r) => sum + r.securityIssues, 0);
+    const securityErrorCount = allResults.filter((r) => r.securityError).length;
     // Identify top priorities
     const topPriorities = [];
     // Security issues first
@@ -100,6 +109,9 @@ export async function analyzePackageJson(packageJson, checkDevDeps = true) {
     }
     else {
         summary += "All packages up to date!";
+    }
+    if (securityErrorCount > 0) {
+        summary += ` Security lookup failed for ${securityErrorCount} package(s).`;
     }
     return {
         totalDependencies: allResults.length,

@@ -6,7 +6,7 @@
 import { checkSecurityAdvisories } from "./security-client.js";
 import { fetchPackageData } from "./npm-client.js";
 export async function checkSecurity(packageName, version) {
-    // Fetch package info and advisories in parallel
+    // Fetch package info and advisories in parallel; advisory lookup failures propagate.
     const [npmData, advisories] = await Promise.all([
         fetchPackageData(packageName),
         checkSecurityAdvisories(packageName, version),

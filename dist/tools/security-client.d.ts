@@ -3,6 +3,9 @@
  *
  * Checks for security vulnerabilities using npm audit API and GitHub advisories.
  */
+export declare class AdvisoryLookupError extends Error {
+    constructor(message: string);
+}
 export interface SecurityAdvisory {
     id: string;
     severity: "critical" | "high" | "moderate" | "low";

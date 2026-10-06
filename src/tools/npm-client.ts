@@ -36,7 +36,8 @@ export async function fetchPackageData(
       if (response.status === 404) return null;
       throw new Error(`NPM API error: ${response.status}`);
     }
-    return await response.json();
+    const data: NpmPackageData = await response.json();
+    return { ...data, version: data.version ?? data["dist-tags"]?.latest };
   } catch (error) {
     console.error(`Failed to fetch npm data for ${packageName}:`, error);
     return null;

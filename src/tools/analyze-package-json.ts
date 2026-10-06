@@ -6,7 +6,7 @@
 
 import semver from "semver";
 import { fetchPackageData, fetchDownloads } from "./npm-client.js";
-import { checkSecurityAdvisories } from "./security-client.js";
+import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
 
 export interface DependencyAnalysis {
   name: string;
@@ -14,6 +14,7 @@ export interface DependencyAnalysis {
   latest?: string;
   status: "up-to-date" | "patch" | "minor" | "major" | "unknown";
   securityIssues: number;
+  securityError?: string;
   weeklyDownloads?: number;
   recommendation?: string;
 }
@@ -32,10 +33,15 @@ async function analyzeDependency(
   name: string,
   versionSpec: string
 ): Promise<DependencyAnalysis> {
+  let securityError: string | undefined;
   const [npmData, downloads, advisories] = await Promise.all([
     fetchPackageData(name),
     fetchDownloads(name, "last-week"),
-    checkSecurityAdvisories(name),
+    checkSecurityAdvisories(name).catch((error: unknown) => {
+      if (!(error instanceof AdvisoryLookupError)) throw error;
+      securityError = error.message;
+      return [];
+    }),
   ]);
 
   // Parse current version from spec (remove ^, ~, etc.)
@@ -47,6 +53,7 @@ async function analyzeDependency(
       current: currentVersion,
       status: "unknown",
       securityIssues: advisories.length,
+      securityError,
       recommendation: "Package not found on npm",
     };
   }
@@ -83,6 +90,7 @@ async function analyzeDependency(
     latest: npmData.version,
     status,
     securityIssues: advisories.length,
+    securityError,
     weeklyDownloads: downloads?.downloads,
     recommendation,
   };
@@ -112,6 +120,7 @@ export async function analyzePackageJson(
   const allResults = [...depResults, ...devDepResults];
   const outdatedCount = allResults.filter((r) => r.status !== "up-to-date" && r.status !== "unknown").length;
   const securityIssueCount = allResults.reduce((sum, r) => sum + r.securityIssues, 0);
+  const securityErrorCount = allResults.filter((r) => r.securityError).length;
 
   // Identify top priorities
   const topPriorities: string[] = [];
@@ -141,6 +150,9 @@ export async function analyzePackageJson(
     summary += `${outdatedCount} packages have updates available.`;
   } else {
     summary += "All packages up to date!";
+  }
+  if (securityErrorCount > 0) {
+    summary += ` Security lookup failed for ${securityErrorCount} package(s).`;
   }
 
   return {
