@@ -2,7 +2,7 @@
  * Exa Deep Search Client
  *
  * Shared client for Exa's Deep and Deep-Reasoning search types.
- * Deep conducts agentic research — it reasons about intent, spawns parallel
+ * Deep conducts agentic research: it reasons about intent, spawns parallel
  * search agents, and synthesizes results with field-level citations.
  *
  * Use Deep when you need *research*, not just search results.
@@ -86,14 +86,14 @@ export declare class ExaDeepClient {
     private readonly baseUrl;
     constructor(apiKey?: string);
     /**
-     * Deep Search — agentic research with structured output + citations.
+     * Deep Search: agentic research with structured output + citations.
      *
      * Use "deep" for fast synthesis (4-12s).
      * Use "deep-reasoning" when the query requires multi-step reasoning (12-50s).
      */
     deepSearch(request: ExaDeepRequest): Promise<ExaDeepResponse>;
     /**
-     * Research endpoint — async, for tasks that need minutes of deep research.
+     * Research endpoint: async, for tasks that need minutes of deep research.
      * Returns a researchId you poll until completion.
      *
      * Pricing: $5/1k queries + $5/1k pages + $5/1M reasoning tokens (research)
