@@ -22,6 +22,7 @@ export interface PackageResearch {
         advisoryCount: number;
         criticalCount: number;
         highCount: number;
+        error?: string;
         advisories: Array<{
             id: string;
             severity: string;

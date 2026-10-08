@@ -11,7 +11,7 @@ The server lists eight tools.
 | `research_package` | Deep dive on a specific npm package (downloads, stars, security, maintenance, TS support, license) | none |
 | `compare_packages` | Compare 2 to 5 packages side-by-side | none |
 | `find_alternatives` | Find alternatives to a given package | none |
-| `check_security` | Check for security advisories | none |
+| `check_security` | Security advisories that affect a package, or one version of it | none |
 | `analyze_package_json` | Analyze a project's dependencies | none |
 | `exa_deep_search` | Web research through Exa Deep search, with citations | `EXA_API_KEY` |
 | `exa_research` | Longer research task through the Exa Research API | `EXA_API_KEY` |
@@ -20,12 +20,7 @@ The server lists eight tools.
 ### Environment variables
 
 - `EXA_API_KEY`: required by `exa_deep_search` and `exa_research` only. Without it those two tools answer `EXA_API_KEY required for Exa Deep client` and the other six keep working.
-- `GITHUB_TOKEN`: optional. When set, it is sent to the GitHub API for repository stats and security advisories, which raises GitHub's rate limit.
-
-### Known limits
-
-- `check_security`, and the security counts inside `research_package` and `analyze_package_json`, return GitHub's 30 newest npm advisories whatever package you ask about. The `version` argument of `check_security` is accepted and ignored.
-- No tool reads a package's latest version. `analyze_package_json` therefore marks every dependency `up-to-date`, and `research_package` leaves out `latestVersion`, `versionsBehind` and the last publish date.
+- `GITHUB_TOKEN`: optional. When set, it is sent to the GitHub API for repository stats and security advisories. Without it GitHub allows 60 requests an hour, and `analyze_package_json` makes one advisory request per dependency; a lookup that fails is reported as failed, never as "no advisories".
 
 ## Setup
 
@@ -79,6 +74,14 @@ Or run the inspector for testing:
 ```bash
 bunx @modelcontextprotocol/inspector node dist/index.js
 ```
+
+## Tests
+
+```bash
+bun test
+```
+
+The tests mock the npm registry and GitHub, so they need no network.
 
 ## Stack
 

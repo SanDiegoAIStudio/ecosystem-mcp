@@ -6,6 +6,30 @@
 
 const GITHUB_ADVISORY_API = "https://api.github.com/advisories";
 
+export class AdvisoryLookupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AdvisoryLookupError";
+  }
+}
+
+interface GitHubAdvisory {
+  ghsa_id?: string;
+  id: string;
+  severity?: string;
+  summary?: string;
+  title?: string;
+  description?: string;
+  cve_id?: string;
+  vulnerabilities?: Array<{
+    package?: { name?: string; ecosystem?: string };
+    patched_versions?: string;
+    vulnerable_version_range?: string;
+  }>;
+  published_at?: string;
+  html_url?: string;
+}
+
 export interface SecurityAdvisory {
   id: string;
   severity: "critical" | "high" | "moderate" | "low";
@@ -16,6 +40,22 @@ export interface SecurityAdvisory {
   vulnerableVersions?: string;
   publishedAt?: string;
   url?: string;
+}
+
+function normalizeSeverity(value: string | undefined): SecurityAdvisory["severity"] {
+  switch (value?.toLowerCase()) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "medium":
+    case "moderate":
+      return "moderate";
+    case "low":
+      return "low";
+    default:
+      return "moderate";
+  }
 }
 
 export async function checkSecurityAdvisories(
@@ -36,39 +76,55 @@ export async function checkSecurityAdvisories(
       headers["Authorization"] = `Bearer ${token}`;
     }
 
-    const response = await fetch(
-      `${GITHUB_ADVISORY_API}?ecosystem=npm&package=${encodeURIComponent(packageName)}`,
-      { headers }
-    );
+    const affects = version ? `${packageName}@${version}` : packageName;
+    let url: string | undefined =
+      `${GITHUB_ADVISORY_API}?ecosystem=npm&per_page=100&affects=${encodeURIComponent(affects)}`;
 
-    if (response.ok) {
-      const data = await response.json();
+    for (let page = 0; url && page < 10; page++) {
+      const response: Response = await fetch(url, { headers });
+      if (!response.ok) {
+        throw new AdvisoryLookupError(
+          `GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`
+        );
+      }
+
+      const data: GitHubAdvisory[] | null = await response.json().catch(() => null);
+      if (!Array.isArray(data)) {
+        throw new AdvisoryLookupError(
+          `GitHub advisory lookup failed for ${packageName}: unexpected response body`
+        );
+      }
+
       for (const advisory of data) {
+        const vulnerability = advisory.vulnerabilities?.find(
+          (entry) => entry.package?.name === packageName && entry.package.ecosystem === "npm"
+        );
+        if (!vulnerability) continue;
+
         advisories.push({
           id: advisory.ghsa_id || advisory.id,
-          severity: advisory.severity?.toLowerCase() || "moderate",
+          severity: normalizeSeverity(advisory.severity),
           title: advisory.summary || advisory.title || "Unknown vulnerability",
           description: advisory.description,
           cve: advisory.cve_id,
-          patchedVersions: advisory.vulnerabilities?.[0]?.patched_versions,
-          vulnerableVersions: advisory.vulnerabilities?.[0]?.vulnerable_version_range,
+          patchedVersions: vulnerability.patched_versions,
+          vulnerableVersions: vulnerability.vulnerable_version_range,
           publishedAt: advisory.published_at,
           url: advisory.html_url,
         });
       }
+
+      url = response.headers.get("link")
+        ?.split(",")
+        .find((link) => /;\s*rel="next"/.test(link))
+        ?.match(/<([^>]+)>/)?.[1];
+      if (!url?.startsWith("https://api.github.com/")) url = undefined;
     }
   } catch (error) {
-    console.error(`Failed to check GitHub advisories for ${packageName}:`, error);
-  }
-
-  // Filter by version if provided
-  if (version && advisories.length > 0) {
-    // Simple version filtering - could be enhanced with semver
-    return advisories.filter((a) => {
-      if (!a.vulnerableVersions) return true;
-      // Basic check - production would use proper semver matching
-      return true; // Return all for now, let caller filter
-    });
+    if (error instanceof AdvisoryLookupError) throw error;
+    throw new AdvisoryLookupError(
+      `GitHub advisory lookup failed for ${packageName}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 
   return advisories;

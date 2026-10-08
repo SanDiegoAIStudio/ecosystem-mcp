@@ -26,7 +26,7 @@ export async function checkSecurity(
   packageName: string,
   version?: string
 ): Promise<SecurityCheckResult> {
-  // Fetch package info and advisories in parallel
+  // Fetch package info and advisories in parallel; advisory lookup failures propagate.
   const [npmData, advisories] = await Promise.all([
     fetchPackageData(packageName),
     checkSecurityAdvisories(packageName, version),
