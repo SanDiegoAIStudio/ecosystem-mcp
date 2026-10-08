@@ -11,6 +11,8 @@
  * - find_alternatives: Find alternatives to a package
  * - check_security: Check for security advisories
  * - analyze_package_json: Analyze a project's dependencies
+ * - exa_deep_search: Web research through Exa Deep search
+ * - exa_research: Longer research task through the Exa Research API
  * - get_trending: Get trending packages in a category
  */
 
@@ -31,7 +33,6 @@ import {
   getTrending,
   deepSearch,
   research,
-  SCHEMAS,
 } from "./tools/index.js";
 
 // =============================================================================
@@ -187,21 +188,6 @@ Requires EXA_API_KEY environment variable.`,
           type: "object",
           description: "Optional JSON Schema for structured output. Deep will return data matching this schema with field-level citations.",
         },
-        preset: {
-          type: "string",
-          enum: [
-            "companyProfile",
-            "preCallBriefing",
-            "competitiveLandscape",
-            "meetingPrep",
-            "strategicPath",
-            "freelanceOpportunity",
-            "siteProfile",
-            "topicEnrichment",
-            "marketScan",
-          ],
-          description: "Use a preset output schema instead of providing a custom one",
-        },
         numResults: {
           type: "number",
           description: "Number of source results (default: 10)",
@@ -237,21 +223,6 @@ Polls until completion and returns the final result.`,
         outputSchema: {
           type: "object",
           description: "Optional JSON Schema for structured output (max 8 root fields, 5 levels deep)",
-        },
-        preset: {
-          type: "string",
-          enum: [
-            "companyProfile",
-            "preCallBriefing",
-            "competitiveLandscape",
-            "meetingPrep",
-            "strategicPath",
-            "freelanceOpportunity",
-            "siteProfile",
-            "topicEnrichment",
-            "marketScan",
-          ],
-          description: "Use a preset output schema",
         },
         model: {
           type: "string",
@@ -362,12 +333,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case "exa_deep_search": {
-        const schema = args?.preset
-          ? SCHEMAS[args.preset as keyof typeof SCHEMAS]
-          : (args?.outputSchema as Record<string, unknown> | undefined);
         result = await deepSearch(
           args?.query as string,
-          schema,
+          args?.outputSchema as Record<string, unknown> | undefined,
           {
             type: (args?.type as "deep" | "deep-reasoning") ?? "deep",
             numResults: args?.numResults as number | undefined,
@@ -379,12 +347,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "exa_research": {
-        const researchSchema = args?.preset
-          ? SCHEMAS[args.preset as keyof typeof SCHEMAS]
-          : (args?.outputSchema as Record<string, unknown> | undefined);
         result = await research(
           args?.instructions as string,
-          researchSchema,
+          args?.outputSchema as Record<string, unknown> | undefined,
           (args?.model as "exa-research" | "exa-research-pro") ?? "exa-research"
         );
         break;

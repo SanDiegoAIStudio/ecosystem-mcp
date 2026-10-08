@@ -1,7 +1,6 @@
 # Ecosystem MCP
 
 **Type:** MCP server for package intelligence
-**Location:** `~/Developer/tools/ecosystem-mcp`
 **Language:** TypeScript (ESM)
 
 ## Commands
@@ -16,18 +15,20 @@ bun run start        # Production
 ## Structure
 
 - `src/index.ts` -- Server entry, tool definitions
-- `src/tools/` -- Tool implementations (research, compare, find, security, analyze, trending)
+- `src/tools/` -- Tool implementations (research, compare, find, security, analyze, trending, Exa search)
 - `dist/` -- Built output
 
 ## Tools Provided
 
-Six MCP tools for npm ecosystem intelligence:
+Eight MCP tools, in the order the server lists them:
 1. `research_package` -- Deep package research
 2. `compare_packages` -- Side-by-side comparison
 3. `find_alternatives` -- Alternative discovery
 4. `check_security` -- Security advisory check
 5. `analyze_package_json` -- Dependency analysis
-6. `get_trending` -- Trending packages by category
+6. `exa_deep_search` -- Web research through Exa Deep search (needs `EXA_API_KEY`)
+7. `exa_research` -- Longer research task through the Exa Research API (needs `EXA_API_KEY`)
+8. `get_trending` -- Trending packages by category
 
 ## Dependencies
 
@@ -38,5 +39,5 @@ Six MCP tools for npm ecosystem intelligence:
 ## Notes
 
 - Requires Node 20+
-- No authentication needed (uses public registry APIs)
-- Test with MCP inspector: `bunx @anthropic-ai/mcp-inspector tsx src/index.ts`
+- The six package tools need no key (public registry APIs); the two Exa tools need `EXA_API_KEY`; `GITHUB_TOKEN` is optional
+- Test with MCP inspector: `bunx @modelcontextprotocol/inspector node dist/index.js`

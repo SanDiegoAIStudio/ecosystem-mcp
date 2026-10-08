@@ -11,12 +11,14 @@
  * - find_alternatives: Find alternatives to a package
  * - check_security: Check for security advisories
  * - analyze_package_json: Analyze a project's dependencies
+ * - exa_deep_search: Web research through Exa Deep search
+ * - exa_research: Longer research task through the Exa Research API
  * - get_trending: Get trending packages in a category
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-import { researchPackage, comparePackages, findAlternatives, checkSecurity, analyzePackageJson, getTrending, deepSearch, research, SCHEMAS, } from "./tools/index.js";
+import { researchPackage, comparePackages, findAlternatives, checkSecurity, analyzePackageJson, getTrending, deepSearch, research, } from "./tools/index.js";
 // =============================================================================
 // TOOL DEFINITIONS
 // =============================================================================
@@ -169,21 +171,6 @@ Requires EXA_API_KEY environment variable.`,
                     type: "object",
                     description: "Optional JSON Schema for structured output. Deep will return data matching this schema with field-level citations.",
                 },
-                preset: {
-                    type: "string",
-                    enum: [
-                        "companyProfile",
-                        "preCallBriefing",
-                        "competitiveLandscape",
-                        "meetingPrep",
-                        "strategicPath",
-                        "freelanceOpportunity",
-                        "siteProfile",
-                        "topicEnrichment",
-                        "marketScan",
-                    ],
-                    description: "Use a preset output schema instead of providing a custom one",
-                },
                 numResults: {
                     type: "number",
                     description: "Number of source results (default: 10)",
@@ -219,21 +206,6 @@ Polls until completion and returns the final result.`,
                 outputSchema: {
                     type: "object",
                     description: "Optional JSON Schema for structured output (max 8 root fields, 5 levels deep)",
-                },
-                preset: {
-                    type: "string",
-                    enum: [
-                        "companyProfile",
-                        "preCallBriefing",
-                        "competitiveLandscape",
-                        "meetingPrep",
-                        "strategicPath",
-                        "freelanceOpportunity",
-                        "siteProfile",
-                        "topicEnrichment",
-                        "marketScan",
-                    ],
-                    description: "Use a preset output schema",
                 },
                 model: {
                     type: "string",
@@ -318,10 +290,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 result = await analyzePackageJson(args?.packageJson, args?.checkDevDeps);
                 break;
             case "exa_deep_search": {
-                const schema = args?.preset
-                    ? SCHEMAS[args.preset]
-                    : args?.outputSchema;
-                result = await deepSearch(args?.query, schema, {
+                result = await deepSearch(args?.query, args?.outputSchema, {
                     type: args?.type ?? "deep",
                     numResults: args?.numResults,
                     includeDomains: args?.includeDomains,
@@ -330,10 +299,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 break;
             }
             case "exa_research": {
-                const researchSchema = args?.preset
-                    ? SCHEMAS[args.preset]
-                    : args?.outputSchema;
-                result = await research(args?.instructions, researchSchema, args?.model ?? "exa-research");
+                result = await research(args?.instructions, args?.outputSchema, args?.model ?? "exa-research");
                 break;
             }
             case "get_trending":

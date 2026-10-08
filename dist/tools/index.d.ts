@@ -9,7 +9,7 @@ export { findAlternatives } from "./find-alternatives.js";
 export { checkSecurity } from "./check-security.js";
 export { analyzePackageJson } from "./analyze-package-json.js";
 export { getTrending } from "./get-trending.js";
-export { ExaDeepClient, deepSearch, research, SCHEMAS, } from "./exa-deep.js";
+export { ExaDeepClient, deepSearch, research, } from "./exa-deep.js";
 export type { PackageResearch } from "./research-package.js";
 export type { PackageComparison } from "./compare-packages.js";
 export type { AlternativesResult, Alternative } from "./find-alternatives.js";

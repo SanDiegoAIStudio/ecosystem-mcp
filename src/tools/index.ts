@@ -14,7 +14,6 @@ export {
   ExaDeepClient,
   deepSearch,
   research,
-  SCHEMAS,
 } from "./exa-deep.js";
 
 // Types
