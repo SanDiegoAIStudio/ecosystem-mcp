@@ -1,7 +1,7 @@
 /**
  * Security Advisory Client
  *
- * Checks for security vulnerabilities using npm audit API and GitHub advisories.
+ * Checks for security vulnerabilities using the GitHub Security Advisories API.
  */
 export declare class AdvisoryLookupError extends Error {
     constructor(message: string);
@@ -17,4 +17,4 @@ export interface SecurityAdvisory {
     publishedAt?: string;
     url?: string;
 }
-export declare function checkSecurityAdvisories(packageName: string, version?: string): Promise<SecurityAdvisory[]>;
+export declare function checkSecurityAdvisories(packageName: string, version: string): Promise<SecurityAdvisory[]>;

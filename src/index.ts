@@ -16,6 +16,9 @@
  * - get_trending: Get trending packages in a category
  */
 
+import { realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -39,19 +42,10 @@ import {
 // TOOL DEFINITIONS
 // =============================================================================
 
-const tools: Tool[] = [
+export const tools: Tool[] = [
   {
     name: "research_package",
-    description: `Research an npm package in depth. Returns:
-- Current vs latest version
-- Weekly downloads, GitHub stars
-- Security advisories
-- Maintenance status (last commit, open issues)
-- TypeScript support
-- License info
-- Bundle size (if available)
-
-Use this when you need to evaluate a package before recommending it.`,
+    description: "Research one npm package. Returns the latest version, weekly and monthly downloads, GitHub stars, forks, open issues, last push and whether the repository is archived, the security advisories that affect one version (the version in use when currentVersion is given, otherwise the latest), days since the last publish, maintainer count, whether type definitions are included, the license, and npm's deprecation notice when there is one. With currentVersion it also returns how many stable releases behind that version is.",
     inputSchema: {
       type: "object",
       properties: {
@@ -61,7 +55,7 @@ Use this when you need to evaluate a package before recommending it.`,
         },
         currentVersion: {
           type: "string",
-          description: "Optional: Current version in use (for comparison)",
+          description: "Optional: the version, range or tag in use",
         },
       },
       required: ["package"],
@@ -69,13 +63,7 @@ Use this when you need to evaluate a package before recommending it.`,
   },
   {
     name: "compare_packages",
-    description: `Compare multiple npm packages side-by-side. Returns a comparison table with:
-- Downloads, stars, maintenance
-- Bundle sizes
-- TypeScript support
-- Last update dates
-
-Use this when helping choose between alternatives.`,
+    description: "Compare 2 to 5 npm packages. For each one: latest version, weekly downloads, GitHub stars, last publish date, whether type definitions are included, license and maintainer count. A package that is missing or could not be read is marked as such.",
     inputSchema: {
       type: "object",
       properties: {
@@ -92,12 +80,7 @@ Use this when helping choose between alternatives.`,
   },
   {
     name: "find_alternatives",
-    description: `Find alternative packages to a given package. Returns:
-- List of alternatives with pros/cons
-- Migration effort estimate
-- Popularity comparison
-
-Use this when a package is deprecated, has security issues, or user wants options.`,
+    description: "List curated alternatives to a well-known npm package, each with weekly downloads, GitHub stars, short notes for and against, and a rough migration effort. Packages outside the curated list return an empty list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -105,23 +88,13 @@ Use this when a package is deprecated, has security issues, or user wants option
           type: "string",
           description: "Package to find alternatives for",
         },
-        category: {
-          type: "string",
-          description: "Optional: Category hint (e.g., 'state-management', 'testing', 'date-library')",
-        },
       },
       required: ["package"],
     },
   },
   {
     name: "check_security",
-    description: `Check for security advisories affecting a package or version. Returns:
-- Known vulnerabilities (CVEs)
-- Severity levels
-- Patched versions
-- Recommended actions
-
-Use this before recommending a package or when auditing dependencies.`,
+    description: "List the security advisories that affect one version of an npm package: the version given, or the latest version when none is given. A range is read as the version a fresh install would get. Returns the version checked, counts by severity, and each advisory with its vulnerable and patched ranges.",
     inputSchema: {
       type: "object",
       properties: {
@@ -131,7 +104,7 @@ Use this before recommending a package or when auditing dependencies.`,
         },
         version: {
           type: "string",
-          description: "Optional: Specific version to check",
+          description: "Optional: a version or range to check. Default: the latest version",
         },
       },
       required: ["package"],
@@ -139,13 +112,7 @@ Use this before recommending a package or when auditing dependencies.`,
   },
   {
     name: "analyze_package_json",
-    description: `Analyze a package.json file and provide recommendations. Returns:
-- Outdated dependencies
-- Security vulnerabilities
-- Deprecated packages
-- Suggested updates with breaking change warnings
-
-Use this to audit a project's dependencies.`,
+    description: "Check a package.json's dependencies against npm. A range is read as the version a fresh install would get, since no lockfile is read. For each one: whether it is behind (patch, minor or major), how many advisories affect the version in use, and npm's deprecation notice. It looks at the first 20 dependencies and the first 10 devDependencies and says so when there are more. Dependencies that point at a workspace, a file, a git repository or a URL are not looked up.",
     inputSchema: {
       type: "object",
       properties: {
@@ -236,18 +203,13 @@ Polls until completion and returns the final result.`,
   },
   {
     name: "get_trending",
-    description: `Get trending/popular packages in a category. Returns:
-- Top packages by downloads
-- Rising packages (fast growth)
-- Category recommendations
-
-Categories: state-management, testing, ui-components, date-time, validation, http-client, orm, bundler, css-framework, animation`,
+    description: "Popular packages in a category, from a curated list, with weekly downloads, GitHub stars and a rising, stable or declining label that compares the last week with the last month.",
     inputSchema: {
       type: "object",
       properties: {
         category: {
           type: "string",
-          description: "Category to search",
+          description: "Category to search: state-management, testing, ui-components, date-time, validation, http-client, orm, bundler, css-framework, animation",
           enum: [
             "state-management",
             "testing",
@@ -261,10 +223,6 @@ Categories: state-management, testing, ui-components, date-time, validation, htt
             "animation",
           ],
         },
-        framework: {
-          type: "string",
-          description: "Optional: Framework context (react, vue, svelte, node)",
-        },
       },
       required: ["category"],
     },
@@ -272,95 +230,193 @@ Categories: state-management, testing, ui-components, date-time, validation, htt
 ];
 
 // =============================================================================
-// SERVER SETUP
+// ARGUMENT SCHEMAS
 // =============================================================================
 
-const server = new Server(
-  {
-    name: "ecosystem-mcp",
-    version: "1.0.0",
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
+const nonEmptyString = z.string().min(1);
+const dependencyMap = z.record(z.string(), z.string());
+
+const researchPackageArgs = z.object({
+  package: nonEmptyString,
+  currentVersion: z.string().optional(),
+}).strict();
+
+const comparePackagesArgs = z.object({
+  packages: z.array(nonEmptyString).min(2).max(5),
+}).strict();
+
+const findAlternativesArgs = z.object({
+  package: nonEmptyString,
+}).strict();
+
+const checkSecurityArgs = z.object({
+  package: nonEmptyString,
+  version: z.string().optional(),
+}).strict();
+
+const analyzePackageJsonArgs = z.object({
+  packageJson: z
+    .object({
+      dependencies: dependencyMap.optional(),
+      devDependencies: dependencyMap.optional(),
+    })
+    .passthrough(),
+  checkDevDeps: z.boolean().optional(),
+}).strict();
+
+const exaCategory = z.enum([
+  "research paper",
+  "news",
+  "tweet",
+  "company",
+  "people",
+  "github",
+  "linkedin",
+  "pdf",
+]);
+
+const exaDeepSearchArgs = z.object({
+  query: nonEmptyString,
+  type: z.enum(["deep", "deep-reasoning"]).optional(),
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  numResults: z.number().optional(),
+  includeDomains: z.array(z.string()).optional(),
+  category: exaCategory.optional(),
+}).strict();
+
+const exaResearchArgs = z.object({
+  instructions: nonEmptyString,
+  outputSchema: z.record(z.string(), z.unknown()).optional(),
+  model: z.enum(["exa-research", "exa-research-pro"]).optional(),
+}).strict();
+
+const getTrendingArgs = z.object({
+  category: z.enum([
+    "state-management",
+    "testing",
+    "ui-components",
+    "date-time",
+    "validation",
+    "http-client",
+    "orm",
+    "bundler",
+    "css-framework",
+    "animation",
+  ]),
+}).strict();
+
+interface ToolTextResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+}
+
+function invalidArguments(tool: string, error: z.ZodError): ToolTextResult {
+  const issue = error.issues[0];
+  let field = issue && issue.path.length > 0 ? issue.path.map(String).join(".") : "arguments";
+  let detail = issue?.message ?? "Invalid input";
+  if (issue?.code === "unrecognized_keys" && issue.keys[0]) {
+    const key = issue.keys[0];
+    field = issue.path.length > 0 ? `${field}.${key}` : key;
+    detail = "Unrecognized key";
   }
-);
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Invalid arguments for ${tool}: ${field}: ${detail}`,
+      },
+    ],
+    isError: true,
+  };
+}
 
-// List available tools
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools,
-}));
+function readArgs<T>(
+  tool: string,
+  schema: z.ZodType<T>,
+  args: unknown
+): { ok: true; data: T } | { ok: false; result: ToolTextResult } {
+  const parsed = schema.safeParse(args ?? {});
+  if (!parsed.success) {
+    return { ok: false, result: invalidArguments(tool, parsed.error) };
+  }
+  return { ok: true, data: parsed.data };
+}
 
-// Handle tool calls
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+export async function handleToolCall(request: {
+  params: { name: string; arguments?: unknown };
+}): Promise<ToolTextResult> {
+  const { name } = request.params;
+  const rawArgs = request.params.arguments ?? {};
 
   try {
     let result: unknown;
 
     switch (name) {
-      case "research_package":
-        result = await researchPackage(
-          args?.package as string,
-          args?.currentVersion as string | undefined
-        );
+      case "research_package": {
+        const parsed = readArgs(name, researchPackageArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await researchPackage(parsed.data.package, parsed.data.currentVersion);
         break;
+      }
 
-      case "compare_packages":
-        result = await comparePackages(args?.packages as string[]);
+      case "compare_packages": {
+        const parsed = readArgs(name, comparePackagesArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await comparePackages(parsed.data.packages);
         break;
+      }
 
-      case "find_alternatives":
-        result = await findAlternatives(
-          args?.package as string,
-          args?.category as string | undefined
-        );
+      case "find_alternatives": {
+        const parsed = readArgs(name, findAlternativesArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await findAlternatives(parsed.data.package);
         break;
+      }
 
-      case "check_security":
-        result = await checkSecurity(
-          args?.package as string,
-          args?.version as string | undefined
-        );
+      case "check_security": {
+        const parsed = readArgs(name, checkSecurityArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await checkSecurity(parsed.data.package, parsed.data.version);
         break;
+      }
 
-      case "analyze_package_json":
-        result = await analyzePackageJson(
-          args?.packageJson as Record<string, unknown>,
-          args?.checkDevDeps as boolean | undefined
-        );
+      case "analyze_package_json": {
+        const parsed = readArgs(name, analyzePackageJsonArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        const packageJson: Record<string, unknown> = { ...parsed.data.packageJson };
+        result = await analyzePackageJson(packageJson, parsed.data.checkDevDeps);
         break;
+      }
 
       case "exa_deep_search": {
-        result = await deepSearch(
-          args?.query as string,
-          args?.outputSchema as Record<string, unknown> | undefined,
-          {
-            type: (args?.type as "deep" | "deep-reasoning") ?? "deep",
-            numResults: args?.numResults as number | undefined,
-            includeDomains: args?.includeDomains as string[] | undefined,
-            category: args?.category as "news" | "company" | "people" | undefined,
-          }
-        );
+        const parsed = readArgs(name, exaDeepSearchArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await deepSearch(parsed.data.query, parsed.data.outputSchema, {
+          type: parsed.data.type ?? "deep",
+          numResults: parsed.data.numResults,
+          includeDomains: parsed.data.includeDomains,
+          category: parsed.data.category,
+        });
         break;
       }
 
       case "exa_research": {
+        const parsed = readArgs(name, exaResearchArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
         result = await research(
-          args?.instructions as string,
-          args?.outputSchema as Record<string, unknown> | undefined,
-          (args?.model as "exa-research" | "exa-research-pro") ?? "exa-research"
+          parsed.data.instructions,
+          parsed.data.outputSchema,
+          parsed.data.model ?? "exa-research"
         );
         break;
       }
 
-      case "get_trending":
-        result = await getTrending(
-          args?.category as string,
-          args?.framework as string | undefined
-        );
+      case "get_trending": {
+        const parsed = readArgs(name, getTrendingArgs, rawArgs);
+        if (!parsed.ok) return parsed.result;
+        result = await getTrending(parsed.data.category);
         break;
+      }
 
       default:
         return {
@@ -394,6 +450,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+}
+
+// =============================================================================
+// SERVER SETUP
+// =============================================================================
+
+const server = new Server(
+  {
+    name: "ecosystem-mcp",
+    version: "1.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+// List available tools
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools,
+}));
+
+// Handle tool calls. The object is built here so it matches the SDK result type.
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const outcome = await handleToolCall(request);
+  const text = outcome.content[0]?.text ?? "";
+  if (outcome.isError) {
+    return {
+      content: [{ type: "text", text }],
+      isError: true,
+    };
+  }
+  return {
+    content: [{ type: "text", text }],
+  };
 });
 
 // =============================================================================
@@ -406,7 +498,33 @@ async function main() {
   console.error("Ecosystem MCP server running on stdio");
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+export function cliEntryMatches(modulePath: string, entryPath: string): boolean {
+  try {
+    const moduleReal = realpathSync(modulePath);
+    let entryReal: string;
+    try {
+      entryReal = realpathSync(entryPath);
+    } catch {
+      entryReal = realpathSync(`${entryPath}.js`);
+    }
+    if (statSync(entryReal).isDirectory()) {
+      return moduleReal === realpathSync(join(entryReal, "index.js"));
+    }
+    return moduleReal === entryReal;
+  } catch {
+    return false;
+  }
+}
+
+function runningAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return cliEntryMatches(fileURLToPath(import.meta.url), entry);
+}
+
+if (runningAsCli()) {
+  main().catch((error) => {
+    console.error("Fatal error:", error);
+    process.exit(1);
+  });
+}

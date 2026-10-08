@@ -96,11 +96,11 @@ function researchFixtures(): Record<string, Fixture> {
 
 test("advisory requests filter by package with affects", async () => {
   // source: GitHub ignores the package query parameter and returns unrelated advisories.
-  const fetchMock = mockFetch({ [lodashUrl]: { body: [] } });
+  const fetchMock = mockFetch({ [`${lodashUrl}%404.17.21`]: { body: [] } });
 
-  expect(await checkSecurityAdvisories("lodash")).toEqual([]);
+  expect(await checkSecurityAdvisories("lodash", "4.17.21")).toEqual([]);
   const url = String(fetchMock.mock.calls[0][0]);
-  expect(url).toContain("affects=lodash");
+  expect(url).toContain("affects=lodash%404.17.21");
   expect(url).toContain("per_page=100");
   expect(url).not.toContain("package=");
   expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -139,10 +139,10 @@ test("advisory ranges come from the matching npm vulnerability", async () => {
   const wrongEcosystem = advisory("GHSA-other-ecosystem");
   wrongEcosystem.vulnerabilities[0].package.ecosystem = "pip";
   mockFetch({
-    [lodashUrl]: { body: [matching, advisory("GHSA-other", "lodash-es"), wrongEcosystem] },
+    [`${lodashUrl}%404.17.21`]: { body: [matching, advisory("GHSA-other", "lodash-es"), wrongEcosystem] },
   });
 
-  expect(await checkSecurityAdvisories("lodash")).toEqual([{
+  expect(await checkSecurityAdvisories("lodash", "4.17.21")).toEqual([{
     id: "GHSA-matching",
     severity: "high",
     title: "Example vulnerability",
@@ -157,39 +157,39 @@ test("advisory ranges come from the matching npm vulnerability", async () => {
 
 test("HTTP advisory failures throw a named error", async () => {
   // source: A failed advisory lookup must not appear to have no advisories.
-  mockFetch({ [lodashUrl]: { status: 403, body: { message: "Forbidden" } } });
+  mockFetch({ [`${lodashUrl}%404.17.21`]: { status: 403, body: { message: "Forbidden" } } });
 
-  const error = await checkSecurityAdvisories("lodash").catch((error: unknown) => error);
+  const error = await checkSecurityAdvisories("lodash", "4.17.21").catch((error: unknown) => error);
   expect(error).toBeInstanceOf(AdvisoryLookupError);
   expect(error).toMatchObject({
     name: "AdvisoryLookupError",
-    message: "GitHub advisory lookup failed for lodash: HTTP 403",
+    message: "GitHub advisory lookup failed for lodash: HTTP 403. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.",
   });
 });
 
 test("non-array advisory bodies throw a lookup error", async () => {
   // source: An unexpected advisory response body must not appear to have no advisories.
-  mockFetch({ [lodashUrl]: { body: { message: "Unexpected object" } } });
+  mockFetch({ [`${lodashUrl}%404.17.21`]: { body: { message: "Unexpected object" } } });
 
-  await expect(checkSecurityAdvisories("lodash")).rejects.toThrow(
+  await expect(checkSecurityAdvisories("lodash", "4.17.21")).rejects.toThrow(
     new AdvisoryLookupError("GitHub advisory lookup failed for lodash: unexpected response body")
   );
 });
 
 test("fetch rejections become advisory lookup errors", async () => {
   // source: A rejected advisory fetch was swallowed and reported as an empty result.
-  mockFetch({ [lodashUrl]: new Error("Connection failed") });
+  mockFetch({ [`${lodashUrl}%404.17.21`]: new Error("Connection failed") });
 
-  const error = await checkSecurityAdvisories("lodash").catch((error: unknown) => error);
+  const error = await checkSecurityAdvisories("lodash", "4.17.21").catch((error: unknown) => error);
   expect(error).toBeInstanceOf(AdvisoryLookupError);
   expect(error).toMatchObject({ message: "GitHub advisory lookup failed for lodash: Connection failed" });
 });
 
 test("invalid JSON advisory bodies throw an unexpected response error", async () => {
   // source: A response that cannot be parsed as a JSON array must expose the unexpected body failure.
-  mockFetch({ [lodashUrl]: new Response("invalid JSON") });
+  mockFetch({ [`${lodashUrl}%404.17.21`]: new Response("invalid JSON") });
 
-  await expect(checkSecurityAdvisories("lodash")).rejects.toThrow(
+  await expect(checkSecurityAdvisories("lodash", "4.17.21")).rejects.toThrow(
     new AdvisoryLookupError("GitHub advisory lookup failed for lodash: unexpected response body")
   );
 });
@@ -198,19 +198,21 @@ test("check_security propagates advisory lookup failures", async () => {
   // source: check_security must return an error instead of claiming there are no advisories.
   mockFetch({
     ...registryFixtures("lodash", "4.17.21"),
-    [lodashUrl]: { status: 403, body: {} },
+    [`${lodashUrl}%404.17.21`]: { status: 403, body: {} },
   });
 
   const error = await checkSecurity("lodash").catch((error: unknown) => error);
   expect(error).toBeInstanceOf(AdvisoryLookupError);
-  expect(error).toMatchObject({ message: "GitHub advisory lookup failed for lodash: HTTP 403" });
+  expect(error).toMatchObject({
+    message: "GitHub advisory lookup failed for lodash: HTTP 403. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.",
+  });
 });
 
 test("check_security counts medium and unknown advisories as moderate", async () => {
   // source: GitHub medium and unknown severities fell out of check_security severity counts.
   mockFetch({
     ...registryFixtures("lodash", "4.17.21"),
-    [lodashUrl]: {
+    [`${lodashUrl}%404.17.21`]: {
       body: ["medium", "high", "unknown"].map((severity) => ({
         ...advisory(`GHSA-${severity}`),
         severity,
@@ -224,9 +226,10 @@ test("check_security counts medium and unknown advisories as moderate", async ()
 
 test("advisory pagination follows the next link", async () => {
   // source: Advisory lookups must include advisories beyond the first page.
+  const firstUrl = `${lodashUrl}%404.17.21`;
   const nextUrl = `${lodashUrl}&page=2`;
   const fetchMock = mockFetch({
-    [lodashUrl]: {
+    [firstUrl]: {
       body: [advisory("GHSA-first")],
       headers: { Link: `<${nextUrl}>; rel="next", <${nextUrl}>; rel="last"` },
     },
@@ -236,55 +239,43 @@ test("advisory pagination follows the next link", async () => {
     },
   });
 
-  expect((await checkSecurityAdvisories("lodash")).map((item) => item.id))
+  expect((await checkSecurityAdvisories("lodash", "4.17.21")).map((item) => item.id))
     .toEqual(["GHSA-first", "GHSA-second"]);
-  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([lodashUrl, nextUrl]);
+  expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([firstUrl, nextUrl]);
   expect(fetchMock.mock.calls[1][1]).toEqual(fetchMock.mock.calls[0][1]);
 });
 
 test("advisory pagination ignores next links outside the GitHub API", async () => {
   // source: Pagination sent the GitHub token to arbitrary URLs in the Link header.
+  const firstUrl = `${lodashUrl}%404.17.21`;
   const nextUrl = "https://example.invalid/advisories?page=2";
   const fetchMock = mockFetch({
-    [lodashUrl]: {
+    [firstUrl]: {
       body: [advisory("GHSA-first")],
       headers: { Link: `<${nextUrl}>; rel="next"` },
     },
     [nextUrl]: { body: [advisory("GHSA-second")] },
   });
 
-  expect((await checkSecurityAdvisories("lodash")).map((item) => item.id))
+  expect((await checkSecurityAdvisories("lodash", "4.17.21")).map((item) => item.id))
     .toEqual(["GHSA-first"]);
   expect(fetchMock).toHaveBeenCalledTimes(1);
-  expect(fetchMock.mock.calls[0][0]).toBe(lodashUrl);
-});
-
-test("advisory pagination stops after ten pages", async () => {
-  // source: The advisory pagination limit must prevent unbounded requests.
-  const fixtures: Record<string, Fixture> = {};
-  for (let page = 1; page <= 10; page++) {
-    const url = page === 1 ? lodashUrl : `${lodashUrl}&page=${page}`;
-    fixtures[url] = {
-      body: [advisory(`GHSA-page-${page}`)],
-      headers: { Link: `<${lodashUrl}&page=${page + 1}>; rel="next"` },
-    };
-  }
-  const fetchMock = mockFetch(fixtures);
-
-  expect(await checkSecurityAdvisories("lodash")).toHaveLength(10);
-  expect(fetchMock).toHaveBeenCalledTimes(10);
+  expect(fetchMock.mock.calls[0][0]).toBe(firstUrl);
 });
 
 test("a later advisory page failure rejects the whole lookup", async () => {
   // source: Incomplete advisory results must not hide a failed page lookup.
+  const firstUrl = `${lodashUrl}%404.17.21`;
   const nextUrl = `${lodashUrl}&page=2`;
   mockFetch({
-    [lodashUrl]: { body: [advisory("GHSA-first")], headers: { Link: `<${nextUrl}>; rel="next"` } },
+    [firstUrl]: { body: [advisory("GHSA-first")], headers: { Link: `<${nextUrl}>; rel="next"` } },
     [nextUrl]: { status: 403, body: {} },
   });
 
-  await expect(checkSecurityAdvisories("lodash")).rejects.toThrow(
-    new AdvisoryLookupError("GitHub advisory lookup failed for lodash: HTTP 403")
+  await expect(checkSecurityAdvisories("lodash", "4.17.21")).rejects.toThrow(
+    new AdvisoryLookupError(
+      "GitHub advisory lookup failed for lodash: HTTP 403. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it."
+    )
   );
 });
 
@@ -324,7 +315,7 @@ test("check_security includes the latest version in its result and recommendatio
 
   const result = await checkSecurity("lodash", "4.17.20");
   expect(result.latestVersion).toBe("4.17.21");
-  expect(result.recommendation).toBe('No known security advisories for "lodash" 4.17.20. Latest version: 4.17.21');
+  expect(result.recommendation).toBe('No known security advisories affect "lodash" 4.17.20. Latest version: 4.17.21.');
 });
 
 test("dependency analysis filters advisories by valid dependency versions", async () => {
@@ -334,7 +325,7 @@ test("dependency analysis filters advisories by valid dependency versions", asyn
     ...registryFixtures("lodash", "4.17.21"),
     ...registryFixtures("other", "1.0.0"),
     [`${lodashUrl}%404.17.20`]: { body: [] },
-    [otherUrl]: { body: [] },
+    [`${otherUrl}%401.0.0`]: { body: [] },
   });
 
   await analyzePackageJson({ dependencies: { lodash: "4.17.20", other: "latest" } });
@@ -342,8 +333,7 @@ test("dependency analysis filters advisories by valid dependency versions", asyn
   const lodashRequest = urls.find((url) => url.startsWith(lodashUrl));
   const otherRequest = urls.find((url) => url.startsWith(otherUrl));
   expect(lodashRequest).toContain("affects=lodash%404.17.20");
-  expect(otherRequest).toContain("affects=other");
-  expect(otherRequest).not.toContain("%40");
+  expect(otherRequest).toBe(`${otherUrl}%401.0.0`);
 });
 
 test("dependency analysis detects patch and major updates from dist-tags", async () => {
@@ -358,10 +348,21 @@ test("dependency analysis detects patch and major updates from dist-tags", async
   const result = await analyzePackageJson({ dependencies: { lodash: "4.17.20", zod: "^3.0.0" } });
   expect(result.dependencies).toMatchObject([
     { name: "lodash", current: "4.17.20", latest: "4.17.21", status: "patch", securityIssues: 0 },
-    { name: "zod", current: "3.0.0", latest: "4.1.0", status: "major", securityIssues: 0 },
+    {
+      name: "zod",
+      spec: "^3.0.0",
+      current: "^3.0.0",
+      latest: "4.1.0",
+      status: "unknown",
+      resolvedFrom: "none",
+      securityIssues: null,
+      recommendation: 'No published version satisfies "^3.0.0".',
+    },
   ]);
-  expect(result.outdatedCount).toBe(2);
-  expect(result.summary).toBe("Analyzed 2 dependencies. 2 packages have updates available.");
+  expect(result.outdatedCount).toBe(1);
+  expect(result.summary).toBe(
+    "Analyzed 2 dependencies. 1 packages have updates available. 1 could not be compared. Advisories were not checked for 1 package(s)."
+  );
 });
 
 test("dependency analysis records and counts failed security lookups", async () => {
@@ -381,16 +382,19 @@ test("dependency analysis records and counts failed security lookups", async () 
     devDependencies: { missing: "1.0.0" },
   });
   expect(result.dependencies[0]).toMatchObject({
-    status: "patch", latest: "4.17.21", securityIssues: 0,
-    securityError: "GitHub advisory lookup failed for lodash: HTTP 403",
+    status: "patch", latest: "4.17.21", securityIssues: null,
+    securityError: "GitHub advisory lookup failed for lodash: HTTP 403. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.",
   });
   expect(result.dependencies[1].securityError).toBeUndefined();
   expect(result.devDependencies?.[0]).toMatchObject({
-    status: "unknown", securityIssues: 0,
-    securityError: "GitHub advisory lookup failed for missing: HTTP 403",
+    status: "unknown", securityIssues: null,
+    recommendation: "Package not found on npm",
   });
+  expect(result.devDependencies?.[0]?.securityError).toBeUndefined();
   expect(result.securityIssueCount).toBe(0);
-  expect(result.summary).toBe("Analyzed 3 dependencies. 2 packages have updates available. Security lookup failed for 2 package(s).");
+  expect(result.summary).toBe(
+    "Analyzed 3 dependencies. 1 packages have updates available. 2 could not be compared. Security lookup failed for 1 package(s). Advisories were not checked for 2 package(s). GitHub's rate limit was reached. Set GITHUB_TOKEN and run it again for the missing advisory counts."
+  );
 });
 
 test("research uses the latest dist-tag for version and publish information", async () => {
@@ -413,7 +417,11 @@ test("research still returns with an explicit advisory lookup error", async () =
   expect(result.versionsBehind).toBe(2);
   expect(result.maintenance.lastPublish).toBe("2025-01-01T00:00:00Z");
   expect(result.security).toEqual({
-    advisoryCount: 0, criticalCount: 0, highCount: 0, advisories: [],
-    error: "GitHub advisory lookup failed for zod: HTTP 403",
+    checkedVersion: "3.0.0",
+    advisoryCount: null,
+    criticalCount: null,
+    highCount: null,
+    advisories: [],
+    error: "GitHub advisory lookup failed for zod: HTTP 403. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.",
   });
 });

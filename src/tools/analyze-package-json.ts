@@ -5,95 +5,296 @@
  */
 
 import semver from "semver";
-import { fetchPackageData, fetchDownloads } from "./npm-client.js";
-import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
+import {
+  deprecationMessage,
+  fetchDownloads,
+  fetchPackageData,
+  NpmLookupError,
+  type NpmDownloads,
+  type NpmPackageData,
+} from "./npm-client.js";
+import { AdvisoryLookupError, checkSecurityAdvisories, type SecurityAdvisory } from "./security-client.js";
+import { isRegistrySpec, resolveVersion } from "./version-resolve.js";
+
+const DEPENDENCY_LIMIT = 20;
+const DEV_DEPENDENCY_LIMIT = 10;
+const LOOKUP_CONCURRENCY = 5;
 
 export interface DependencyAnalysis {
   name: string;
+  spec: string;
   current: string;
   latest?: string;
+  resolvedFrom?: "latest" | "range" | "tag" | "none";
   status: "up-to-date" | "patch" | "minor" | "major" | "unknown";
-  securityIssues: number;
+  securityIssues: number | null;
   securityError?: string;
   weeklyDownloads?: number;
   recommendation?: string;
+  deprecated?: string;
+}
+
+export interface AnalysisCounts {
+  analyzed: number;
+  total: number;
 }
 
 export interface PackageJsonAnalysis {
   totalDependencies: number;
+  analyzedDependencies: number;
   outdatedCount: number;
   securityIssueCount: number;
   dependencies: DependencyAnalysis[];
   devDependencies?: DependencyAnalysis[];
   summary: string;
   topPriorities: string[];
+  analyzedCounts?: {
+    dependencies?: AnalysisCounts;
+    devDependencies?: AnalysisCounts;
+  };
+}
+
+async function mapWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      const current = nextIndex;
+      if (current >= items.length) return;
+      nextIndex = current + 1;
+      results[current] = await fn(items[current]);
+    }
+  }
+
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+function deprecatedField(pkg: NpmPackageData | null): { deprecated?: string } {
+  if (!pkg) return {};
+  const deprecated = deprecationMessage(pkg);
+  return deprecated ? { deprecated } : {};
+}
+
+async function inspectDependency(
+  name: string,
+  versionSpec: string
+): Promise<DependencyAnalysis> {
+  if (!isRegistrySpec(versionSpec)) {
+    return {
+      name,
+      spec: versionSpec,
+      current: versionSpec,
+      status: "unknown",
+      securityIssues: null,
+      recommendation: `Version spec "${versionSpec}" does not point at an npm registry version, so it was not looked up.`,
+    };
+  }
+
+  let npmData: NpmPackageData | null;
+  let downloads: NpmDownloads | null;
+  try {
+    [npmData, downloads] = await Promise.all([
+      fetchPackageData(name),
+      fetchDownloads(name, "last-week"),
+    ]);
+  } catch (error) {
+    if (error instanceof NpmLookupError) {
+      return {
+        name,
+        spec: versionSpec,
+        current: versionSpec,
+        status: "unknown",
+        securityIssues: null,
+        recommendation: error.message,
+      };
+    }
+    throw error;
+  }
+
+  if (!npmData) {
+    return {
+      name,
+      spec: versionSpec,
+      current: versionSpec,
+      status: "unknown",
+      securityIssues: null,
+      recommendation: "Package not found on npm",
+    };
+  }
+
+  const resolved = resolveVersion(versionSpec, npmData);
+  if (resolved.kind === "none") {
+    return {
+      name,
+      spec: versionSpec,
+      current: versionSpec,
+      resolvedFrom: "none",
+      latest: npmData.version,
+      status: "unknown",
+      securityIssues: null,
+      weeklyDownloads: downloads?.downloads,
+      recommendation: resolved.reason,
+      ...deprecatedField(npmData),
+    };
+  }
+
+  const currentVersion = resolved.version;
+
+  let securityError: string | undefined;
+  let securityIssues: number | null = null;
+  let advisories: SecurityAdvisory[] = [];
+  try {
+    advisories = await checkSecurityAdvisories(name, currentVersion);
+    securityIssues = advisories.length;
+  } catch (error) {
+    if (!(error instanceof AdvisoryLookupError)) throw error;
+    securityError = error.message;
+    securityIssues = null;
+  }
+
+  let status: DependencyAnalysis["status"] = "up-to-date";
+  let recommendation: string | undefined;
+
+  if (semver.valid(currentVersion) && semver.valid(npmData.version)) {
+    if (semver.lt(currentVersion, npmData.version)) {
+      const diff = semver.diff(currentVersion, npmData.version);
+      if (diff === "major" || diff === "premajor") {
+        status = "major";
+        recommendation = `Major update available: ${currentVersion} → ${npmData.version}. Check changelog for breaking changes.`;
+      } else if (diff === "minor" || diff === "preminor") {
+        status = "minor";
+        recommendation = `Minor update: ${currentVersion} → ${npmData.version}`;
+      } else if (diff === "patch" || diff === "prepatch" || diff === "prerelease") {
+        status = "patch";
+        recommendation = `Patch update: ${currentVersion} → ${npmData.version}`;
+      }
+    }
+  } else {
+    status = "unknown";
+    recommendation = `The latest version on npm ("${npmData.version}") is not a version that can be compared.`;
+  }
+
+  const criticalOrHigh = advisories.filter(
+    (advisory) => advisory.severity === "critical" || advisory.severity === "high"
+  );
+  if (criticalOrHigh.length > 0) {
+    const count = criticalOrHigh.length;
+    const sentence = count === 1
+      ? `1 critical or high severity advisory affects ${name} ${currentVersion}.`
+      : `${count} critical or high severity advisories affect ${name} ${currentVersion}.`;
+    if (status === "patch" || status === "minor" || status === "major") {
+      recommendation = `${sentence} Latest version: ${npmData.version}.`;
+    } else {
+      recommendation = sentence;
+    }
+  }
+
+  return {
+    name,
+    spec: versionSpec,
+    current: currentVersion,
+    ...(resolved.kind === "exact" ? {} : { resolvedFrom: resolved.kind }),
+    latest: npmData.version,
+    status,
+    securityIssues,
+    ...(securityError ? { securityError } : {}),
+    weeklyDownloads: downloads?.downloads,
+    recommendation,
+    ...deprecatedField(npmData),
+  };
 }
 
 async function analyzeDependency(
   name: string,
   versionSpec: string
 ): Promise<DependencyAnalysis> {
-  let securityError: string | undefined;
-  // Parse current version from spec (remove ^, ~, etc.)
-  const currentVersion = versionSpec.replace(/^[\^~>=<]+/, "");
-
-  const [npmData, downloads, advisories] = await Promise.all([
-    fetchPackageData(name),
-    fetchDownloads(name, "last-week"),
-    checkSecurityAdvisories(name, semver.valid(currentVersion) ? currentVersion : undefined).catch((error: unknown) => {
-      if (!(error instanceof AdvisoryLookupError)) throw error;
-      securityError = error.message;
-      return [];
-    }),
-  ]);
-
-  if (!npmData) {
+  try {
+    return await inspectDependency(name, versionSpec);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     return {
       name,
-      current: currentVersion,
+      spec: versionSpec,
+      current: versionSpec,
       status: "unknown",
-      securityIssues: advisories.length,
-      securityError,
-      recommendation: "Package not found on npm",
+      securityIssues: null,
+      recommendation: message,
     };
   }
+}
 
-  // Determine update status
-  let status: DependencyAnalysis["status"] = "up-to-date";
-  let recommendation: string | undefined;
+function buildSummary(
+  allResults: DependencyAnalysis[],
+  limitNotes: string[],
+  securityIssueCount: number,
+  outdatedCount: number,
+  securityErrorCount: number
+): string {
+  if (allResults.length === 0) return "No dependencies to analyze.";
 
-  if (semver.valid(currentVersion) && semver.valid(npmData.version)) {
-    const diff = semver.diff(currentVersion, npmData.version);
-    if (diff === "major") {
-      status = "major";
-      recommendation = `Major update available: ${currentVersion} → ${npmData.version}. Check changelog for breaking changes.`;
-    } else if (diff === "minor") {
-      status = "minor";
-      recommendation = `Minor update: ${currentVersion} → ${npmData.version}`;
-    } else if (diff === "patch" || diff === "prepatch" || diff === "prerelease") {
-      status = "patch";
-      recommendation = `Patch update: ${currentVersion} → ${npmData.version}`;
-    }
+  const parts: string[] = [];
+  if (limitNotes.length > 0) parts.push(...limitNotes);
+  else parts.push(`Analyzed ${allResults.length} dependencies.`);
+
+  if (securityIssueCount > 0) {
+    parts.push(`Advisories affecting the versions in use: ${securityIssueCount}.`);
   }
 
-  // Override with security recommendation if needed
-  const criticalOrHigh = advisories.filter(
-    (a) => a.severity === "critical" || a.severity === "high"
-  );
-  if (criticalOrHigh.length > 0) {
-    recommendation = `⚠️ ${criticalOrHigh.length} security issue(s). Update immediately!`;
+  const listCut = limitNotes.length > 0;
+  const allUpToDate = allResults.every((result) => result.status === "up-to-date");
+  if (outdatedCount > 0) {
+    parts.push(`${outdatedCount} packages have updates available.`);
+  } else if (allUpToDate && listCut) {
+    parts.push(`The ${allResults.length} analyzed are up to date.`);
+  } else if (allUpToDate) {
+    parts.push("All packages are up to date.");
   }
 
-  return {
-    name,
-    current: currentVersion,
-    latest: npmData.version,
-    status,
-    securityIssues: advisories.length,
-    securityError,
-    weeklyDownloads: downloads?.downloads,
-    recommendation,
-  };
+  const unknownCount = allResults.filter((result) => result.status === "unknown").length;
+  if (unknownCount > 0) parts.push(`${unknownCount} could not be compared.`);
+
+  const deprecatedCount = allResults.filter((result) => result.deprecated).length;
+  if (deprecatedCount > 0) parts.push(`${deprecatedCount} deprecated.`);
+
+  if (securityErrorCount > 0) {
+    parts.push(`Security lookup failed for ${securityErrorCount} package(s).`);
+  }
+
+  const notChecked = allResults.filter(
+    (result) => result.securityIssues === null && !result.securityError
+  ).length;
+  if (notChecked > 0) {
+    parts.push(`Advisories were not checked for ${notChecked} package(s).`);
+  }
+
+  if (allResults.some((result) => result.securityError?.includes("rate limit"))) {
+    parts.push(
+      "GitHub's rate limit was reached. Set GITHUB_TOKEN and run it again for the missing advisory counts."
+    );
+  }
+
+  if (
+    allResults.some(
+      (result) =>
+        result.resolvedFrom === "range" ||
+        result.resolvedFrom === "tag" ||
+        result.resolvedFrom === "latest"
+    )
+  ) {
+    parts.push(
+      "Ranges and tags were read as a fresh install would resolve them. A lockfile may hold an older version."
+    );
+  }
+
+  return parts.join(" ");
 }
 
 export async function analyzePackageJson(
@@ -105,63 +306,69 @@ export async function analyzePackageJson(
     ? ((packageJson.devDependencies || {}) as Record<string, string>)
     : {};
 
-  // Analyze dependencies (limit to avoid rate limiting)
-  const depEntries = Object.entries(deps).slice(0, 20);
-  const devDepEntries = checkDevDeps
-    ? Object.entries(devDeps).slice(0, 10)
-    : [];
+  const depTotal = Object.keys(deps).length;
+  const devDepTotal = Object.keys(devDeps).length;
+  const depEntries = Object.entries(deps).slice(0, DEPENDENCY_LIMIT);
+  const devDepEntries = Object.entries(devDeps).slice(0, DEV_DEPENDENCY_LIMIT);
 
-  const [depResults, devDepResults] = await Promise.all([
-    Promise.all(depEntries.map(([name, version]) => analyzeDependency(name, version))),
-    Promise.all(devDepEntries.map(([name, version]) => analyzeDependency(name, version))),
-  ]);
+  const depResults = await mapWithLimit(depEntries, LOOKUP_CONCURRENCY, ([name, version]) =>
+    analyzeDependency(name, version)
+  );
+  const devDepResults = await mapWithLimit(devDepEntries, LOOKUP_CONCURRENCY, ([name, version]) =>
+    analyzeDependency(name, version)
+  );
 
-  // Count issues
   const allResults = [...depResults, ...devDepResults];
-  const outdatedCount = allResults.filter((r) => r.status !== "up-to-date" && r.status !== "unknown").length;
-  const securityIssueCount = allResults.reduce((sum, r) => sum + r.securityIssues, 0);
-  const securityErrorCount = allResults.filter((r) => r.securityError).length;
+  const outdatedCount = allResults.filter((result) => result.status !== "up-to-date" && result.status !== "unknown").length;
+  const securityIssueCount = allResults.reduce((sum, result) => sum + (result.securityIssues ?? 0), 0);
+  const securityErrorCount = allResults.filter((result) => result.securityError).length;
 
-  // Identify top priorities
   const topPriorities: string[] = [];
-
-  // Security issues first
   const withSecurity = allResults
-    .filter((r) => r.securityIssues > 0)
-    .sort((a, b) => b.securityIssues - a.securityIssues);
+    .filter((result) => (result.securityIssues ?? 0) > 0)
+    .sort((a, b) => (b.securityIssues ?? 0) - (a.securityIssues ?? 0));
   for (const dep of withSecurity.slice(0, 3)) {
-    topPriorities.push(`🔒 Update ${dep.name} - ${dep.securityIssues} security issue(s)`);
+    const count = dep.securityIssues ?? 0;
+    topPriorities.push(
+      count === 1
+        ? `${dep.name}: 1 advisory affects ${dep.current}`
+        : `${dep.name}: ${count} advisories affect ${dep.current}`
+    );
   }
-
-  // Major updates
-  const majorUpdates = allResults.filter((r) => r.status === "major");
+  let deprecatedListed = 0;
+  for (const dep of allResults) {
+    if (!dep.deprecated) continue;
+    if (deprecatedListed === 3) break;
+    topPriorities.push(`${dep.name} is deprecated on npm`);
+    deprecatedListed += 1;
+  }
+  const majorUpdates = allResults.filter((result) => result.status === "major");
   for (const dep of majorUpdates.slice(0, 2)) {
-    if (!topPriorities.some((p) => p.includes(dep.name))) {
-      topPriorities.push(`📦 ${dep.name}: major update ${dep.current} → ${dep.latest}`);
+    if (!topPriorities.some((line) => line.includes(dep.name))) {
+      topPriorities.push(`${dep.name}: major update ${dep.current} to ${dep.latest}`);
     }
   }
 
-  // Generate summary
-  let summary = `Analyzed ${allResults.length} dependencies. `;
-  if (securityIssueCount > 0) {
-    summary += `⚠️ ${securityIssueCount} security issues found. `;
+  const analyzedCounts: NonNullable<PackageJsonAnalysis["analyzedCounts"]> = {};
+  const limitNotes: string[] = [];
+  if (depTotal > DEPENDENCY_LIMIT) {
+    analyzedCounts.dependencies = { analyzed: depResults.length, total: depTotal };
+    limitNotes.push(`Analyzed the first ${depResults.length} of ${depTotal} dependencies.`);
   }
-  if (outdatedCount > 0) {
-    summary += `${outdatedCount} packages have updates available.`;
-  } else {
-    summary += "All packages up to date!";
-  }
-  if (securityErrorCount > 0) {
-    summary += ` Security lookup failed for ${securityErrorCount} package(s).`;
+  if (devDepTotal > DEV_DEPENDENCY_LIMIT) {
+    analyzedCounts.devDependencies = { analyzed: devDepResults.length, total: devDepTotal };
+    limitNotes.push(`Analyzed the first ${devDepResults.length} of ${devDepTotal} devDependencies.`);
   }
 
   return {
-    totalDependencies: allResults.length,
+    totalDependencies: depTotal + devDepTotal,
+    analyzedDependencies: allResults.length,
     outdatedCount,
     securityIssueCount,
     dependencies: depResults,
     devDependencies: devDepResults.length > 0 ? devDepResults : undefined,
-    summary,
+    summary: buildSummary(allResults, limitNotes, securityIssueCount, outdatedCount, securityErrorCount),
     topPriorities,
+    ...(Object.keys(analyzedCounts).length > 0 ? { analyzedCounts } : {}),
   };
 }

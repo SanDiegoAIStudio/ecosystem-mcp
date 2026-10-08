@@ -3,6 +3,10 @@
  *
  * Find alternative packages to a given package.
  */
+export declare function alternativeNotes(): Record<string, {
+    pros: string[];
+    cons: string[];
+}>;
 export interface Alternative {
     name: string;
     description?: string;
@@ -14,8 +18,11 @@ export interface Alternative {
 }
 export interface AlternativesResult {
     original: string;
-    category?: string;
     alternatives: Alternative[];
+    notLoaded: Array<{
+        name: string;
+        reason: string;
+    }>;
     recommendation?: string;
 }
-export declare function findAlternatives(packageName: string, _category?: string): Promise<AlternativesResult>;
+export declare function findAlternatives(packageName: string): Promise<AlternativesResult>;

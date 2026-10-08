@@ -6,16 +6,19 @@
 import { type SecurityAdvisory } from "./security-client.js";
 export interface SecurityCheckResult {
     package: string;
+    found: boolean;
     version?: string;
+    checkedVersion?: string;
     latestVersion?: string;
-    totalAdvisories: number;
-    bySeverity: {
+    totalAdvisories?: number;
+    bySeverity?: {
         critical: number;
         high: number;
         moderate: number;
         low: number;
     };
-    advisories: SecurityAdvisory[];
+    advisories?: SecurityAdvisory[];
     recommendation?: string;
+    resolvedFrom?: "exact" | "latest" | "range" | "tag";
 }
 export declare function checkSecurity(packageName: string, version?: string): Promise<SecurityCheckResult>;

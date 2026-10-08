@@ -18,5 +18,9 @@ export interface GitHubRepo {
     archived: boolean;
     disabled: boolean;
 }
+export declare function parseGitHubRepo(url: string): {
+    owner: string;
+    repo: string;
+} | null;
 export declare function fetchRepoFromNpmUrl(repoUrl: string | undefined): Promise<GitHubRepo | null>;
 export declare function fetchRepo(owner: string, repo: string): Promise<GitHubRepo | null>;

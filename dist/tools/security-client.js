@@ -1,7 +1,7 @@
 /**
  * Security Advisory Client
  *
- * Checks for security vulnerabilities using npm audit API and GitHub advisories.
+ * Checks for security vulnerabilities using the GitHub Security Advisories API.
  */
 const GITHUB_ADVISORY_API = "https://api.github.com/advisories";
 export class AdvisoryLookupError extends Error {
@@ -9,6 +9,14 @@ export class AdvisoryLookupError extends Error {
         super(message);
         this.name = "AdvisoryLookupError";
     }
+}
+function isTimeoutOrAbort(error) {
+    if (typeof error !== "object" || error === null || !("name" in error))
+        return false;
+    return error.name === "TimeoutError" || error.name === "AbortError";
+}
+function timedOut(packageName) {
+    return new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: the request timed out`);
 }
 function normalizeSeverity(value) {
     switch (value?.toLowerCase()) {
@@ -37,15 +45,33 @@ export async function checkSecurityAdvisories(packageName, version) {
         if (token) {
             headers["Authorization"] = `Bearer ${token}`;
         }
-        const affects = version ? `${packageName}@${version}` : packageName;
+        const affects = `${packageName}@${version}`;
         let url = `${GITHUB_ADVISORY_API}?ecosystem=npm&per_page=100&affects=${encodeURIComponent(affects)}`;
         for (let page = 0; url && page < 10; page++) {
-            const response = await fetch(url, { headers });
+            const response = await fetch(url, {
+                headers,
+                signal: AbortSignal.timeout(15_000),
+            });
             if (!response.ok) {
-                throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`);
+                const base = `GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`;
+                const rateLimited = response.status === 403 || response.status === 429;
+                throw new AdvisoryLookupError(rateLimited
+                    ? `${base}. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.`
+                    : base);
             }
-            const data = await response.json().catch(() => null);
-            if (!Array.isArray(data)) {
+            let data;
+            try {
+                const parsed = await response.json();
+                if (!Array.isArray(parsed)) {
+                    throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: unexpected response body`);
+                }
+                data = parsed;
+            }
+            catch (error) {
+                if (error instanceof AdvisoryLookupError)
+                    throw error;
+                if (isTimeoutOrAbort(error))
+                    throw timedOut(packageName);
                 throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: unexpected response body`);
             }
             for (const advisory of data) {
@@ -71,10 +97,15 @@ export async function checkSecurityAdvisories(packageName, version) {
             if (!url?.startsWith("https://api.github.com/"))
                 url = undefined;
         }
+        if (url) {
+            throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: more than 1,000 advisories, so the list is incomplete`);
+        }
     }
     catch (error) {
         if (error instanceof AdvisoryLookupError)
             throw error;
+        if (isTimeoutOrAbort(error))
+            throw timedOut(packageName);
         throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return advisories;

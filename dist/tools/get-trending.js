@@ -3,9 +3,8 @@
  *
  * Get trending/popular packages in a category.
  */
-import { fetchPackageData, fetchDownloads } from "./npm-client.js";
+import { fetchDownloads, fetchPackageData, NpmLookupError, repositoryUrl } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
-// Curated lists by category
 const CATEGORY_PACKAGES = {
     "state-management": [
         "zustand",
@@ -13,7 +12,6 @@ const CATEGORY_PACKAGES = {
         "valtio",
         "redux",
         "@reduxjs/toolkit",
-        "recoil",
         "mobx",
         "xstate",
     ],
@@ -33,9 +31,9 @@ const CATEGORY_PACKAGES = {
         "@mantine/core",
         "antd",
         "@mui/material",
-        "shadcn-ui",
+        "shadcn",
     ],
-    "date-time": ["date-fns", "dayjs", "luxon", "moment", "tempo", "@internationalized/date"],
+    "date-time": ["date-fns", "dayjs", "luxon", "moment", "@formkit/tempo", "@internationalized/date"],
     validation: ["zod", "yup", "valibot", "ajv", "joi", "superstruct"],
     "http-client": ["axios", "ky", "got", "undici", "ofetch", "wretch"],
     orm: [
@@ -47,7 +45,7 @@ const CATEGORY_PACKAGES = {
         "kysely",
         "mikro-orm",
     ],
-    bundler: ["vite", "esbuild", "rollup", "webpack", "parcel", "turbopack", "tsup"],
+    bundler: ["vite", "esbuild", "rollup", "webpack", "parcel", "tsup"],
     "css-framework": [
         "tailwindcss",
         "unocss",
@@ -65,75 +63,68 @@ const CATEGORY_PACKAGES = {
         "motion",
     ],
 };
-// Framework-specific filters
-const FRAMEWORK_PREFIXES = {
-    react: ["react-", "@react-", "use-"],
-    vue: ["vue-", "@vue/", "vueuse"],
-    svelte: ["svelte-", "@svelte/"],
-    node: [], // No filter
-};
-export async function getTrending(category, framework) {
-    const packageNames = CATEGORY_PACKAGES[category];
-    if (!packageNames) {
+function trendLabel(weekly, monthly) {
+    if (monthly === undefined)
+        return "unknown";
+    const weeklyAvg = (monthly * 7) / 30;
+    if (weekly > weeklyAvg * 1.1)
+        return "rising";
+    if (weekly < weeklyAvg * 0.9)
+        return "declining";
+    return "stable";
+}
+export async function getTrending(category) {
+    if (!Object.hasOwn(CATEGORY_PACKAGES, category)) {
         throw new Error(`Unknown category: ${category}. Available: ${Object.keys(CATEGORY_PACKAGES).join(", ")}`);
     }
-    // Filter by framework if provided
-    let filteredPackages = packageNames;
-    if (framework && FRAMEWORK_PREFIXES[framework]) {
-        const prefixes = FRAMEWORK_PREFIXES[framework];
-        if (prefixes.length > 0) {
-            filteredPackages = packageNames.filter((pkg) => prefixes.some((p) => pkg.toLowerCase().includes(p.toLowerCase())) ||
-                packageNames.includes(pkg) // Keep all if no matches
-            );
-            // If filter too aggressive, keep original
-            if (filteredPackages.length < 3) {
-                filteredPackages = packageNames;
-            }
+    const packageNames = CATEGORY_PACKAGES[category].slice(0, 8);
+    const loaded = await Promise.all(packageNames.map(async (name) => {
+        try {
+            const npmData = await fetchPackageData(name);
+            if (!npmData)
+                return { name, reason: "not found on npm" };
+            const [weeklyDownloads, monthlyDownloads] = await Promise.all([
+                fetchDownloads(name, "last-week"),
+                fetchDownloads(name, "last-month"),
+            ]);
+            if (!weeklyDownloads)
+                return { name, reason: "weekly downloads unavailable" };
+            const githubData = await fetchRepoFromNpmUrl(repositoryUrl(npmData.repository));
+            const lastUpdate = npmData.time?.[npmData.version];
+            const pkg = {
+                name,
+                description: npmData.description,
+                weeklyDownloads: weeklyDownloads.downloads,
+                ...(typeof githubData?.stargazers_count === "number"
+                    ? { githubStars: githubData.stargazers_count }
+                    : {}),
+                ...(lastUpdate ? { lastUpdate } : {}),
+                trending: trendLabel(weeklyDownloads.downloads, monthlyDownloads?.downloads),
+            };
+            return pkg;
         }
-    }
-    // Fetch data for packages
-    const results = await Promise.all(filteredPackages.slice(0, 8).map(async (name) => {
-        const [npmData, weeklyDownloads, monthlyDownloads] = await Promise.all([
-            fetchPackageData(name),
-            fetchDownloads(name, "last-week"),
-            fetchDownloads(name, "last-month"),
-        ]);
-        if (!npmData || !weeklyDownloads) {
-            return null;
+        catch (error) {
+            if (error instanceof NpmLookupError)
+                return { name, reason: error.message };
+            const reason = error instanceof Error ? error.message : String(error);
+            return { name, reason };
         }
-        const githubData = await fetchRepoFromNpmUrl(npmData.repository?.url);
-        // Calculate trend (compare weekly to monthly average)
-        let trending = "stable";
-        if (monthlyDownloads) {
-            const weeklyAvg = monthlyDownloads.downloads / 4;
-            if (weeklyDownloads.downloads > weeklyAvg * 1.1) {
-                trending = "rising";
-            }
-            else if (weeklyDownloads.downloads < weeklyAvg * 0.9) {
-                trending = "declining";
-            }
-        }
-        return {
-            name,
-            description: npmData.description,
-            weeklyDownloads: weeklyDownloads.downloads,
-            githubStars: githubData?.stargazers_count,
-            lastUpdate: npmData.time?.[npmData.version],
-            trending,
-        };
     }));
-    const validResults = results.filter((r) => r !== null);
-    // Sort by weekly downloads
-    validResults.sort((a, b) => b.weeklyDownloads - a.weeklyDownloads);
-    // Identify rising stars
-    const risingStars = validResults
-        .filter((p) => p.trending === "rising")
-        .map((p) => p.name);
+    const packages = [];
+    const notLoaded = [];
+    for (const entry of loaded) {
+        if ("reason" in entry)
+            notLoaded.push(entry);
+        else
+            packages.push(entry);
+    }
+    packages.sort((a, b) => b.weeklyDownloads - a.weeklyDownloads);
+    const risingStars = packages.filter((pkg) => pkg.trending === "rising").map((pkg) => pkg.name);
     return {
         category,
-        framework,
-        packages: validResults,
-        topPick: validResults[0]?.name,
+        packages,
+        topPick: packages[0]?.name,
         risingStars,
+        notLoaded,
     };
 }
