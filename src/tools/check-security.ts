@@ -4,9 +4,9 @@
  * Check for security advisories affecting a package.
  */
 
-import semver from "semver";
 import { checkSecurityAdvisories, type SecurityAdvisory } from "./security-client.js";
 import { fetchPackageData } from "./npm-client.js";
+import { resolveVersion, versionResolutionSentence, type ResolvedVersion } from "./version-resolve.js";
 
 export interface SecurityCheckResult {
   package: string;
@@ -23,26 +23,17 @@ export interface SecurityCheckResult {
   };
   advisories?: SecurityAdvisory[];
   recommendation?: string;
-}
-
-function versionToCheck(given: string | undefined, latest: string): string {
-  if (given === undefined || given === "latest") return latest;
-  const exact = semver.valid(given);
-  if (exact) return exact;
-  if (semver.validRange(given) !== null) {
-    const min = semver.minVersion(given);
-    if (min) return min.version;
-  }
-  throw new Error(`Version "${given}" is not a version or range that can be checked.`);
+  resolvedFrom?: "exact" | "latest" | "range" | "tag";
 }
 
 function recommendationFor(
   packageName: string,
-  checkedVersion: string,
   latestVersion: string,
   advisories: SecurityAdvisory[],
-  bySeverity: NonNullable<SecurityCheckResult["bySeverity"]>
+  bySeverity: NonNullable<SecurityCheckResult["bySeverity"]>,
+  resolved: Exclude<ResolvedVersion, { kind: "none" }>
 ): string {
+  const checkedVersion = resolved.version;
   const subject = `"${packageName}" ${checkedVersion}`;
   let sentence: string;
   if (advisories.length === 0) {
@@ -63,10 +54,16 @@ function recommendationFor(
       ? `1 advisory affects ${subject}.`
       : `${count} advisories affect ${subject}.`;
   }
+  let text: string;
   if (checkedVersion === latestVersion) {
-    return `${sentence} That is the latest version.`;
+    text = `${sentence} That is the latest version.`;
+  } else {
+    text = `${sentence} Latest version: ${latestVersion}.`;
   }
-  return `${sentence} Latest version: ${latestVersion}.`;
+  if (resolved.kind === "range" || resolved.kind === "tag") {
+    text += ` ${versionResolutionSentence(resolved)}`;
+  }
+  return text;
 }
 
 export async function checkSecurity(
@@ -83,7 +80,9 @@ export async function checkSecurity(
     };
   }
 
-  const checkedVersion = versionToCheck(version, npmData.version);
+  const resolved = resolveVersion(version, npmData);
+  if (resolved.kind === "none") throw new Error(resolved.reason);
+  const checkedVersion = resolved.version;
   const advisories = await checkSecurityAdvisories(packageName, checkedVersion);
 
   const bySeverity = {
@@ -102,12 +101,13 @@ export async function checkSecurity(
     totalAdvisories: advisories.length,
     bySeverity,
     advisories,
+    resolvedFrom: resolved.kind,
     recommendation: recommendationFor(
       packageName,
-      checkedVersion,
       npmData.version,
       advisories,
-      bySeverity
+      bySeverity,
+      resolved
     ),
   };
 }

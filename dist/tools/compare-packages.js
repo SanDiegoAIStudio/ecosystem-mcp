@@ -3,21 +3,27 @@
  *
  * Compare multiple npm packages side-by-side.
  */
-import { fetchPackageData, fetchDownloads, hasTypeScriptSupport, NpmLookupError, repositoryUrl } from "./npm-client.js";
+import { fetchPackageData, fetchDownloads, hasTypeScriptSupport, repositoryUrl } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
 function formatCount(value) {
     return value.toLocaleString("en-US");
 }
-function leader(entries, key) {
-    let best;
-    for (const entry of entries) {
+function metricSentence(entries, key, noun) {
+    const withValue = entries.filter((entry) => typeof entry[key] === "number");
+    if (withValue.length < 2)
+        return undefined;
+    let max = withValue[0][key];
+    for (const entry of withValue) {
         const value = entry[key];
-        if (typeof value !== "number")
-            continue;
-        if (!best || value > best[key])
-            best = entry;
+        if (value > max)
+            max = value;
     }
-    return best;
+    const leaders = withValue.filter((entry) => entry[key] === max);
+    const formatted = formatCount(max);
+    if (leaders.length >= 2) {
+        return `"${leaders[0].name}" and "${leaders[1].name}" have the same ${noun} (${formatted}).`;
+    }
+    return `"${leaders[0].name}" has the most ${noun} (${formatted}).`;
 }
 function recommendationFor(results) {
     const found = results.filter((entry) => entry.status === "found");
@@ -26,14 +32,12 @@ function recommendationFor(results) {
     if (found.length === 0 && failed.length === 0)
         return undefined;
     const sentences = [];
-    const downloadLeader = leader(found, "weeklyDownloads");
-    if (downloadLeader && typeof downloadLeader.weeklyDownloads === "number") {
-        sentences.push(`"${downloadLeader.name}" has the most weekly downloads (${formatCount(downloadLeader.weeklyDownloads)}).`);
-    }
-    const starLeader = leader(found, "githubStars");
-    if (starLeader && typeof starLeader.githubStars === "number") {
-        sentences.push(`"${starLeader.name}" has the most GitHub stars (${formatCount(starLeader.githubStars)}).`);
-    }
+    const downloadSentence = metricSentence(found, "weeklyDownloads", "weekly downloads");
+    if (downloadSentence)
+        sentences.push(downloadSentence);
+    const starSentence = metricSentence(found, "githubStars", "GitHub stars");
+    if (starSentence)
+        sentences.push(starSentence);
     const missingDownloads = found
         .filter((entry) => typeof entry.weeklyDownloads !== "number")
         .map((entry) => entry.name);
@@ -82,10 +86,8 @@ export async function comparePackages(packages) {
             };
         }
         catch (error) {
-            if (error instanceof NpmLookupError) {
-                return { name: pkg, status: "lookup-failed", error: error.message };
-            }
-            throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            return { name: pkg, status: "lookup-failed", error: message };
         }
     }));
     const recommendation = recommendationFor(results);

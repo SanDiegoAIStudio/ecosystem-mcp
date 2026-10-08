@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, expect, mock, test } from "bun:test";
 import { analyzePackageJson } from "../src/tools/analyze-package-json.js";
 import { checkSecurity } from "../src/tools/check-security.js";
@@ -14,7 +17,8 @@ import {
 } from "../src/tools/npm-client.js";
 import { researchPackage } from "../src/tools/research-package.js";
 import { AdvisoryLookupError, checkSecurityAdvisories } from "../src/tools/security-client.js";
-import { handleToolCall, tools } from "../src/index.js";
+import { cliEntryMatches, handleToolCall, tools } from "../src/index.js";
+import { resolveVersion } from "../src/tools/version-resolve.js";
 
 type Fixture = {
   body: unknown;
@@ -143,11 +147,12 @@ test("check_security on a found package with no advisories says there are no kno
   );
 });
 
-test('analyze_package_json does not call ^1.2, latest, or workspace:* up to date', async () => {
-  // source: a range or tag was reported up to date, and the summary could say all packages were.
+test('analyze_package_json does not treat a range with no published match as up to date', async () => {
+  // source: a range was checked at its floor, so "^1.2.0" became 1.2.0 even when that version was not what install would get.
   mockFetch({
     ...dependencyFixtures("a", "1.5.0", "1.2.0"),
     ...registryDownloads("b", "9.0.0"),
+    [affectUrl("b", "9.0.0")]: { body: [] },
     ...dependencyFixtures("d", "1.0.0", "1.0.0"),
   });
 
@@ -155,27 +160,42 @@ test('analyze_package_json does not call ^1.2, latest, or workspace:* up to date
     dependencies: { a: "^1.2.0", b: "latest", c: "workspace:*", d: "1.0.0" },
   });
   expect(result.dependencies).toMatchObject([
-    { name: "a", current: "1.2.0", latest: "1.5.0", status: "minor" },
+    {
+      name: "a",
+      spec: "^1.2.0",
+      current: "^1.2.0",
+      status: "unknown",
+      resolvedFrom: "none",
+      securityIssues: null,
+      recommendation: 'No published version satisfies "^1.2.0".',
+    },
     {
       name: "b",
-      status: "unknown",
-      securityIssues: null,
-      recommendation: 'Version spec "latest" is not a plain version or range, so it was not compared and its advisories were not checked.',
+      spec: "latest",
+      current: "9.0.0",
+      latest: "9.0.0",
+      status: "up-to-date",
+      resolvedFrom: "latest",
+      securityIssues: 0,
     },
     {
       name: "c",
+      spec: "workspace:*",
       status: "unknown",
       securityIssues: null,
       recommendation: 'Version spec "workspace:*" does not point at an npm registry version, so it was not looked up.',
     },
-    { name: "d", current: "1.0.0", latest: "1.0.0", status: "up-to-date" },
+    { name: "d", spec: "1.0.0", current: "1.0.0", latest: "1.0.0", status: "up-to-date" },
   ]);
+  expect(result.dependencies.find((dep) => dep.name === "d")?.resolvedFrom).toBeUndefined();
   expect(result.summary).not.toContain("All packages are up to date.");
-  expect(result.dependencies.filter((dep) => dep.status === "up-to-date").map((dep) => dep.name)).toEqual(["d"]);
+  expect(result.summary).toContain(
+    "Ranges and tags were read as a fresh install would resolve them. A lockfile may hold an older version."
+  );
 });
 
-test("star, empty, and protocol specs are not reported up to date", async () => {
-  // source: *, empty, and npm/git/http/file/link specs were compared as if they were versions.
+test("star and empty specs resolve to latest, and protocol specs are not looked up", async () => {
+  // source: * and an empty spec were left unknown, and npm/git/http/file/link specs were compared as if they were versions.
   const specs: Record<string, string> = {
     star: "*",
     blank: "",
@@ -187,19 +207,21 @@ test("star, empty, and protocol specs are not reported up to date", async () => 
   };
   const fixtures: Record<string, Fixture> = {};
   for (const name of ["star", "blank"]) {
-    Object.assign(fixtures, registryDownloads(name, "1.0.0"));
+    Object.assign(fixtures, dependencyFixtures(name, "1.0.0", "1.0.0"));
   }
   mockFetch(fixtures);
 
   const result = await analyzePackageJson({ dependencies: specs });
-  const registrySpecs = new Set(["star", "blank"]);
+  const latestSpecs = new Set(["star", "blank"]);
   for (const dep of result.dependencies) {
-    expect(dep.status).toBe("unknown");
-    if (registrySpecs.has(dep.name)) {
-      expect(dep.recommendation).toBe(
-        `Version spec "${specs[dep.name]}" is not a plain version or range, so it was not compared and its advisories were not checked.`
-      );
+    if (latestSpecs.has(dep.name)) {
+      expect(dep.status).toBe("up-to-date");
+      expect(dep.current).toBe("1.0.0");
+      expect(dep.spec).toBe(specs[dep.name]);
+      expect(dep.resolvedFrom).toBe("latest");
+      expect(dep.securityIssues).toBe(0);
     } else {
+      expect(dep.status).toBe("unknown");
       expect(dep.recommendation).toBe(
         `Version spec "${specs[dep.name]}" does not point at an npm registry version, so it was not looked up.`
       );
@@ -226,12 +248,28 @@ test("a dependency newer than npm latest is up to date, and premajor counts as m
   ]);
 });
 
-test("hyphen, space, and x-ranges compare from the minimum version", async () => {
-  // source: only a leading ^ or ~ was stripped, so other ranges were not compared from semver.minVersion.
+test("hyphen, space, and x-ranges use the newest published match", async () => {
+  // source: hyphen, space, and x-ranges were checked at semver.minVersion, the oldest version the range allows.
+  function withVersions(name: string, latest: string, versions: string[], advisory: string): Record<string, Fixture> {
+    return {
+      [`https://registry.npmjs.org/${name}`]: {
+        body: {
+          name,
+          version: latest,
+          "dist-tags": { latest },
+          versions: Object.fromEntries(versions.map((version) => [version, {}])),
+        },
+      },
+      [`https://api.npmjs.org/downloads/point/last-week/${name}`]: {
+        body: { downloads: 10, package: name },
+      },
+      [affectUrl(name, advisory)]: { body: [] },
+    };
+  }
   mockFetch({
-    ...dependencyFixtures("hyphen", "2.1.0", "1.2.3"),
-    ...dependencyFixtures("space", "1.9.0", "1.2.3"),
-    ...dependencyFixtures("xrange", "1.5.0", "1.0.0"),
+    ...withVersions("hyphen", "2.1.0", ["1.2.3", "2.0.0", "2.1.0"], "2.0.0"),
+    ...withVersions("space", "1.9.0", ["1.2.3", "1.9.0"], "1.9.0"),
+    ...withVersions("xrange", "1.5.0", ["1.0.0", "1.5.0"], "1.5.0"),
   });
 
   const result = await analyzePackageJson({
@@ -242,9 +280,9 @@ test("hyphen, space, and x-ranges compare from the minimum version", async () =>
     },
   });
   expect(result.dependencies).toMatchObject([
-    { name: "hyphen", current: "1.2.3", status: "major" },
-    { name: "space", current: "1.2.3", status: "minor" },
-    { name: "xrange", current: "1.0.0", status: "minor" },
+    { name: "hyphen", current: "2.0.0", spec: "1.2.3 - 2.0.0", resolvedFrom: "range", status: "minor" },
+    { name: "space", current: "1.9.0", spec: ">=1.2.3 <2.0.0", resolvedFrom: "range", status: "up-to-date" },
+    { name: "xrange", current: "1.5.0", spec: "1.x", resolvedFrom: "range", status: "up-to-date" },
   ]);
 });
 
@@ -436,12 +474,16 @@ test('research_package with currentVersion "^1.2.3" and with "latest" does not t
 
   const ranged = await researchPackage("zod", "^1.2.3");
   expect(ranged.latestVersion).toBe("4.0.0");
-  expect(ranged.versionNote).toBeUndefined();
+  expect(ranged.versionNote).toBe(
+    'The range "^1.2.3" was read as 1.2.3, the version a fresh install would get.'
+  );
   expect(ranged.typescript).toBe(true);
   expect(ranged.versionsBehind).toBe(1);
 
   const tagged = await researchPackage("zod", "latest");
-  expect(tagged.versionNote).toBe('The version "latest" could not be compared.');
+  expect(tagged.versionNote).toBeUndefined();
+  expect(tagged.security.checkedVersion).toBe("4.0.0");
+  expect(tagged.versionsBehind).toBe(0);
 });
 
 test("get_trending loads every curated animation package", async () => {
@@ -646,14 +688,22 @@ test("check_security asks for one concrete version", async () => {
   expect(omitted.recommendation?.endsWith("That is the latest version.")).toBe(true);
 
   fetchMock = mockFetch({
-    ...registryLatest("lodash", latest),
-    [affectUrl("lodash", "4.17.0")]: { body: [] },
+    "https://registry.npmjs.org/lodash": {
+      body: {
+        name: "lodash",
+        version: latest,
+        "dist-tags": { latest },
+        versions: { "4.17.0": {}, "4.17.15": {}, "4.17.21": {}, "5.0.0-beta.1": {} },
+      },
+    },
+    [affectUrl("lodash", latest)]: { body: [] },
   });
   const ranged = await checkSecurity("lodash", "^4.17.0");
   expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
-    affectUrl("lodash", "4.17.0")
+    affectUrl("lodash", latest)
   );
-  expect(ranged.checkedVersion).toBe("4.17.0");
+  expect(ranged.checkedVersion).toBe(latest);
+  expect(ranged.resolvedFrom).toBe("range");
   expect(ranged.version).toBe("^4.17.0");
 
   fetchMock = mockFetch({
@@ -677,7 +727,7 @@ test("check_security asks for one concrete version", async () => {
   const badVersion = await checkSecurity("lodash", "banana").catch((error: unknown) => error);
   expect(badVersion).toBeInstanceOf(Error);
   expect((badVersion as Error).message).toBe(
-    'Version "banana" is not a version or range that can be checked.'
+    '"banana" is not a version, a range or a tag of this package.'
   );
 });
 
@@ -767,14 +817,14 @@ test("versionsBehind ignores prereleases", async () => {
     "https://api.npmjs.org/downloads/point/last-week/steps": { body: { downloads: 1, package: "steps" } },
     "https://api.npmjs.org/downloads/point/last-month/steps": { body: { downloads: 4, package: "steps" } },
     [affectUrl("steps", "1.0.0")]: { body: [] },
-    [affectUrl("steps", "1.0.5")]: { body: [] },
+    [affectUrl("steps", "1.1.0")]: { body: [] },
     [affectUrl("steps", "2.0.0")]: { body: [] },
   };
   mockFetch(fixtures);
 
   expect((await researchPackage("steps", "1.0.0")).versionsBehind).toBe(2);
   expect((await researchPackage("steps", "2.0.0")).versionsBehind).toBe(0);
-  expect((await researchPackage("steps", "^1.0.5")).versionsBehind).toBe(2);
+  expect((await researchPackage("steps", "^1.0.5")).versionsBehind).toBe(1);
   const omitted = await researchPackage("steps");
   expect(omitted.versionsBehind).toBeUndefined();
   expect("versionsBehind" in omitted).toBe(false);
@@ -855,7 +905,7 @@ test("compare_packages recommendation names the leader and the package missing s
 
   const result = await comparePackages(["alpha", "beta"]);
   expect(result.recommendation).toBe(
-    '"beta" has the most weekly downloads (2,500). "alpha" has the most GitHub stars (40). GitHub stars were not available for: beta.'
+    '"beta" has the most weekly downloads (2,500). GitHub stars were not available for: beta.'
   );
 });
 
@@ -873,13 +923,22 @@ test("analyze_package_json does not send workspace or file dependencies to the r
   expect(urls.some((url) => url.includes("kept"))).toBe(true);
 });
 
-test("a latest dependency skips the advisory lookup", async () => {
-  // source: a latest tag was sent to the advisory API and a failed or skipped lookup was counted as zero.
-  const fetchMock = mockFetch(registryDownloads("tagged", "2.0.0"));
+test("a latest dependency is checked at the latest published version", async () => {
+  // source: a latest tag skipped the advisory lookup, so the version a fresh install would get was never checked.
+  const fetchMock = mockFetch({
+    ...registryDownloads("tagged", "2.0.0"),
+    [affectUrl("tagged", "2.0.0")]: { body: [] },
+  });
   const result = await analyzePackageJson({ dependencies: { tagged: "latest" } });
   const urls = fetchMock.mock.calls.map(([url]) => String(url));
-  expect(urls.some((url) => url.includes("advisories"))).toBe(false);
-  expect(result.dependencies[0]?.securityIssues).toBeNull();
+  expect(urls).toContain(affectUrl("tagged", "2.0.0"));
+  expect(result.dependencies[0]).toMatchObject({
+    current: "2.0.0",
+    spec: "latest",
+    resolvedFrom: "latest",
+    status: "up-to-date",
+    securityIssues: 0,
+  });
 });
 
 test("a failed advisory lookup is not counted as zero issues", async () => {
@@ -947,8 +1006,8 @@ test("get_trending lists only the category argument", () => {
   expect(Object.keys(schema.properties ?? {})).toEqual(["category"]);
 });
 
-test("weekly downloads against a monthly average choose rising, stable, or unknown", async () => {
-  // source: the trend label divided the month by 4, and a missing month was called stable.
+test("weekly downloads against a monthly average choose rising, stable, declining, or unknown", async () => {
+  // source: the trend label divided the month by 4, a missing month was called stable, and weekly 60 against monthly 400 was not called declining.
   function point(name: string, weekly: number, monthly: number | null): Record<string, Fixture> {
     const encoded = encodeURIComponent(name);
     return {
@@ -968,7 +1027,7 @@ test("weekly downloads against a monthly average choose rising, stable, or unkno
     ...point("zod", 108, 400),
     ...point("yup", 88, 400),
     ...point("valibot", 50, null),
-    ...point("ajv", 10, 40),
+    ...point("ajv", 60, 400),
     ...point("joi", 10, 40),
     ...point("superstruct", 10, 40),
   });
@@ -977,6 +1036,7 @@ test("weekly downloads against a monthly average choose rising, stable, or unkno
   expect(label("zod")).toBe("rising");
   expect(label("yup")).toBe("stable");
   expect(label("valibot")).toBe("unknown");
+  expect(label("ajv")).toBe("declining");
   expect(names.every((name) => result.packages.some((pkg) => pkg.name === name))).toBe(true);
 });
 
@@ -1226,8 +1286,9 @@ test("hasTypeScriptSupport reads a types key nested in exports", () => {
 test("tool descriptions do not promise bundle size or a framework argument", () => {
   // source: tool descriptions promised bundle sizes and deprecation warnings, and listed framework or category arguments that are not read.
   for (const tool of tools) {
-    expect(tool.description ?? "").not.toContain("Bundle");
-    expect(tool.description ?? "").not.toContain("Deprecated packages");
+    const description = (tool.description ?? "").toLowerCase();
+    expect(description).not.toContain("bundle");
+    expect(description).not.toContain("deprecated packages");
   }
   const trending = tools.find((tool) => tool.name === "get_trending");
   const alternatives = tools.find((tool) => tool.name === "find_alternatives");
@@ -1237,6 +1298,14 @@ test("tool descriptions do not promise bundle size or a framework argument", () 
   expect(Object.keys(alternativesSchema.properties ?? {})).toEqual(["package"]);
   expect(Object.keys(trendingSchema.properties ?? {})).not.toContain("framework");
   expect(Object.keys(alternativesSchema.properties ?? {})).not.toContain("category");
+  // source: check_security and analyze_package_json still said a range is the newest version it allows.
+  expect(
+    ["check_security", "analyze_package_json"].every((name) =>
+      (tools.find((tool) => tool.name === name)?.description ?? "").includes(
+        "the version a fresh install would get"
+      )
+    )
+  ).toBe(true);
 });
 
 test("registry, download, github, advisory, and exa research requests pass an abort signal", async () => {
@@ -1464,8 +1533,15 @@ test("analyze_package_json and check_security answers contain no exclamation or 
   );
   await take(
     {
-      ...registryLatest("lodash", "4.17.21"),
-      [affectUrl("lodash", "4.17.0")]: { body: [] },
+      "https://registry.npmjs.org/lodash": {
+        body: {
+          name: "lodash",
+          version: "4.17.21",
+          "dist-tags": { latest: "4.17.21" },
+          versions: { "4.17.0": {}, "4.17.21": {} },
+        },
+      },
+      [affectUrl("lodash", "4.17.21")]: { body: [] },
     },
     () => checkSecurity("lodash", "^4.17.0")
   );
@@ -1507,6 +1583,7 @@ test("analyze_package_json and check_security answers contain no exclamation or 
     {
       ...dependencyFixtures("a", "1.5.0", "1.2.0"),
       ...registryDownloads("b", "9.0.0"),
+      [affectUrl("b", "9.0.0")]: { body: [] },
       ...dependencyFixtures("d", "1.0.0", "1.0.0"),
     },
     () => analyzePackageJson({
@@ -1514,7 +1591,7 @@ test("analyze_package_json and check_security answers contain no exclamation or 
     })
   );
   const specFixtures: Record<string, Fixture> = {};
-  for (const name of ["star", "blank"]) Object.assign(specFixtures, registryDownloads(name, "1.0.0"));
+  for (const name of ["star", "blank"]) Object.assign(specFixtures, dependencyFixtures(name, "1.0.0", "1.0.0"));
   await take(specFixtures, () => analyzePackageJson({
     dependencies: {
       star: "*",
@@ -1651,5 +1728,607 @@ test("analyze_package_json and check_security answers contain no exclamation or 
     const json = JSON.stringify(result);
     expect(json).not.toContain("!");
     expect(/\p{Extended_Pictographic}/u.test(json)).toBe(false);
+  }
+});
+
+const versionTablePackage = {
+  name: "lodash",
+  version: "4.17.21",
+  versions: {
+    "1.0.0": {},
+    "1.9.9": {},
+    "2.0.0": {},
+    "4.17.0": {},
+    "4.17.15": {},
+    "4.17.21": {},
+    "5.0.0-beta.1": {},
+  },
+  "dist-tags": { latest: "4.17.21", next: "5.0.0-beta.1" },
+};
+
+test("resolveVersion reads a spec as an exact version, the latest, a range, or a tag", () => {
+  // source: "^4.17.0" was read as 4.17.0 and "*" as 0.0.0, so advisories fixed years ago were reported for a project whose install would get a patched version.
+  expect(resolveVersion("4.17.21", versionTablePackage)).toEqual({ kind: "exact", version: "4.17.21" });
+  expect(resolveVersion(undefined, versionTablePackage)).toEqual({ kind: "latest", version: "4.17.21" });
+  expect(resolveVersion("latest", versionTablePackage)).toEqual({ kind: "latest", version: "4.17.21" });
+  expect(resolveVersion("*", versionTablePackage)).toEqual({ kind: "latest", version: "4.17.21" });
+  expect(resolveVersion("", versionTablePackage)).toEqual({ kind: "latest", version: "4.17.21" });
+  expect(resolveVersion("^4.17.0", versionTablePackage)).toEqual({
+    kind: "range",
+    version: "4.17.21",
+    range: "^4.17.0",
+  });
+  expect(resolveVersion(">=1.0.0", versionTablePackage)).toEqual({
+    kind: "range",
+    version: "4.17.21",
+    range: ">=1.0.0",
+  });
+  expect(resolveVersion("<2.0.0", versionTablePackage)).toEqual({
+    kind: "range",
+    version: "1.9.9",
+    range: "<2.0.0",
+  });
+  expect(resolveVersion("next", versionTablePackage)).toEqual({
+    kind: "tag",
+    version: "5.0.0-beta.1",
+    tag: "next",
+  });
+  expect(resolveVersion("^9.0.0", versionTablePackage)).toEqual({
+    kind: "none",
+    reason: 'No published version satisfies "^9.0.0".',
+  });
+  expect(resolveVersion("banana", versionTablePackage)).toEqual({
+    kind: "none",
+    reason: '"banana" is not a version, a range or a tag of this package.',
+  });
+});
+
+test("resolveVersion reads a range as the latest version when that version fits", () => {
+  // source: a range was read as a version newer than the one npm installs
+  const taggedAheadOfLatest = {
+    name: "widget",
+    version: "4.5.0",
+    versions: {
+      "4.4.0": {},
+      "4.5.0": {},
+      "4.6.0": {},
+    },
+    "dist-tags": { latest: "4.5.0", next: "4.6.0" },
+  };
+  expect(resolveVersion("^4.0.0", taggedAheadOfLatest)).toEqual({
+    kind: "range",
+    version: "4.5.0",
+    range: "^4.0.0",
+  });
+  expect(resolveVersion(">4.5.0", taggedAheadOfLatest)).toEqual({
+    kind: "range",
+    version: "4.6.0",
+    range: ">4.5.0",
+  });
+});
+
+test("check_security asks the advisory API for the resolved version", async () => {
+  // source: "^4.17.0" was sent to the advisory API as 4.17.0 and "*" as 0.0.0, and an unknown token was a different error.
+  const latest = "4.17.21";
+  const registry = {
+    "https://registry.npmjs.org/lodash": {
+      body: {
+        name: "lodash",
+        version: latest,
+        "dist-tags": { latest, next: "5.0.0-beta.1" },
+        versions: {
+          "4.17.0": {},
+          "4.17.15": {},
+          "4.17.21": {},
+          "5.0.0-beta.1": {},
+        },
+      },
+    },
+  };
+
+  let fetchMock = mockFetch({
+    ...registry,
+    [affectUrl("lodash", latest)]: { body: [] },
+  });
+  let rangeRejection: unknown = null;
+  let ranged: Awaited<ReturnType<typeof checkSecurity>> | undefined;
+  try {
+    ranged = await checkSecurity("lodash", "^4.17.0");
+  } catch (error) {
+    rangeRejection = error;
+  }
+  expect(rangeRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("lodash", latest)
+  );
+  expect(ranged?.resolvedFrom).toBe("range");
+  expect(ranged?.checkedVersion).toBe(latest);
+  expect(ranged?.recommendation).toBe(
+    'No known security advisories affect "lodash" 4.17.21. That is the latest version. The range "^4.17.0" was read as 4.17.21, the version a fresh install would get.'
+  );
+
+  fetchMock = mockFetch({
+    ...registry,
+    [affectUrl("lodash", latest)]: { body: [] },
+  });
+  let starRejection: unknown = null;
+  let star: Awaited<ReturnType<typeof checkSecurity>> | undefined;
+  try {
+    star = await checkSecurity("lodash", "*");
+  } catch (error) {
+    starRejection = error;
+  }
+  expect(starRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("lodash", latest)
+  );
+  expect(star?.resolvedFrom).toBe("latest");
+  expect(star?.checkedVersion).toBe(latest);
+  expect(star?.recommendation).toBe(
+    'No known security advisories affect "lodash" 4.17.21. That is the latest version.'
+  );
+
+  mockFetch(registry);
+  const badVersion = await checkSecurity("lodash", "banana").catch((error: unknown) => error);
+  expect(badVersion).toBeInstanceOf(Error);
+  expect((badVersion as Error).message).toBe(
+    '"banana" is not a version, a range or a tag of this package.'
+  );
+
+  fetchMock = mockFetch({
+    ...registry,
+    [affectUrl("lodash", "5.0.0-beta.1")]: { body: [] },
+  });
+  let tagRejection: unknown = null;
+  let tagged: Awaited<ReturnType<typeof checkSecurity>> | undefined;
+  try {
+    tagged = await checkSecurity("lodash", "next");
+  } catch (error) {
+    tagRejection = error;
+  }
+  expect(tagRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("lodash", "5.0.0-beta.1")
+  );
+  expect(tagged?.resolvedFrom).toBe("tag");
+  expect(tagged?.recommendation).toBe(
+    'No known security advisories affect "lodash" 5.0.0-beta.1. Latest version: 4.17.21. The tag "next" points at 5.0.0-beta.1.'
+  );
+});
+
+function publishedRegistry(
+  name: string,
+  latest: string,
+  versions: string[],
+  advisoryVersion: string
+): Record<string, Fixture> {
+  return {
+    [`https://registry.npmjs.org/${encodeURIComponent(name)}`]: {
+      body: {
+        name,
+        version: latest,
+        "dist-tags": { latest },
+        versions: Object.fromEntries(versions.map((version) => [version, {}])),
+      },
+    },
+    [`https://api.npmjs.org/downloads/point/last-week/${encodeURIComponent(name)}`]: {
+      body: { downloads: 10, package: name },
+    },
+    [affectUrl(name, advisoryVersion)]: { body: [] },
+  };
+}
+
+test("analyze_package_json reads a range as the newest version it allows", async () => {
+  // source: "^1.2.0" was checked as 1.2.0, so a dependency whose install would get 1.5.0 was called out of date and advisories were looked up for the floor.
+  const fetchMock = mockFetch(publishedRegistry("a", "1.5.0", ["1.2.0", "1.5.0"], "1.5.0"));
+  let rejection: unknown = null;
+  let current: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    current = await analyzePackageJson({ dependencies: { a: "^1.2.0" } });
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeNull();
+  expect(current?.dependencies[0]).toMatchObject({
+    name: "a",
+    current: "1.5.0",
+    latest: "1.5.0",
+    status: "up-to-date",
+    spec: "^1.2.0",
+    resolvedFrom: "range",
+  });
+  const urls = fetchMock.mock.calls.map(([url]) => String(url));
+  expect(urls).toContain(affectUrl("a", "1.5.0"));
+  expect(urls).not.toContain(affectUrl("a", "1.2.0"));
+  expect(current?.summary).toContain(
+    "Ranges and tags were read as a fresh install would resolve them. A lockfile may hold an older version."
+  );
+
+  const majorMock = mockFetch(publishedRegistry("a", "2.0.0", ["1.2.0", "1.5.0", "2.0.0"], "1.5.0"));
+  let majorRejection: unknown = null;
+  let behind: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    behind = await analyzePackageJson({ dependencies: { a: "^1.2.0" } });
+  } catch (error) {
+    majorRejection = error;
+  }
+  expect(majorRejection).toBeNull();
+  expect(behind?.dependencies[0]).toMatchObject({
+    name: "a",
+    current: "1.5.0",
+    latest: "2.0.0",
+    status: "major",
+    spec: "^1.2.0",
+    resolvedFrom: "range",
+  });
+  expect(String(majorMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("a", "1.5.0")
+  );
+  expect(behind?.summary).toContain(
+    "Ranges and tags were read as a fresh install would resolve them. A lockfile may hold an older version."
+  );
+});
+
+test("analyze_package_json reads latest and star as the latest version", async () => {
+  // source: "latest" and "*" were not compared, so advisories for the version a fresh install would get were skipped.
+  const fetchMock = mockFetch({
+    ...dependencyFixtures("b", "2.0.0", "2.0.0"),
+    ...dependencyFixtures("c", "3.1.0", "3.1.0"),
+  });
+  let rejection: unknown = null;
+  let result: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    result = await analyzePackageJson({ dependencies: { b: "latest", c: "*" } });
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeNull();
+  expect(result?.dependencies).toMatchObject([
+    { name: "b", current: "2.0.0", spec: "latest", resolvedFrom: "latest", status: "up-to-date", securityIssues: 0 },
+    { name: "c", current: "3.1.0", spec: "*", resolvedFrom: "latest", status: "up-to-date", securityIssues: 0 },
+  ]);
+  const urls = fetchMock.mock.calls.map(([url]) => String(url));
+  expect(urls).toContain(affectUrl("b", "2.0.0"));
+  expect(urls).toContain(affectUrl("c", "3.1.0"));
+});
+
+test("analyze_package_json names a rate limit in the summary", async () => {
+  // source: a rate-limited advisory lookup was only a per-package error, so the summary never said to set GITHUB_TOKEN.
+  mockFetch({
+    ...registryDownloads("lodash", "4.17.21"),
+    [affectUrl("lodash", "4.17.21")]: { status: 403, body: {} },
+  });
+  let rejection: unknown = null;
+  let result: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    result = await analyzePackageJson({ dependencies: { lodash: "4.17.21" } });
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeNull();
+  expect(result?.summary).toContain(
+    "GitHub's rate limit was reached. Set GITHUB_TOKEN and run it again for the missing advisory counts."
+  );
+});
+
+test("analyze_package_json lists at most three deprecated dependencies", async () => {
+  // source: every deprecated dependency was added to top priorities, so five deprecated packages produced five lines.
+  const names = ["old-a", "old-b", "old-c", "old-d", "old-e"];
+  const dependencies: Record<string, string> = {};
+  const fixtures: Record<string, Fixture> = {};
+  for (const name of names) {
+    dependencies[name] = "1.0.0";
+    fixtures[`https://registry.npmjs.org/${name}`] = {
+      body: {
+        name,
+        version: "1.0.0",
+        "dist-tags": { latest: "1.0.0" },
+        versions: { "1.0.0": { deprecated: "no longer maintained" } },
+      },
+    };
+    fixtures[`https://api.npmjs.org/downloads/point/last-week/${name}`] = {
+      body: { downloads: 1, package: name },
+    };
+    fixtures[affectUrl(name, "1.0.0")] = { body: [] };
+  }
+  mockFetch(fixtures);
+  let rejection: unknown = null;
+  let result: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    result = await analyzePackageJson({ dependencies });
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeNull();
+  expect(result?.topPriorities.filter((line) => line.endsWith("is deprecated on npm"))).toEqual([
+    "old-a is deprecated on npm",
+    "old-b is deprecated on npm",
+    "old-c is deprecated on npm",
+  ]);
+  expect(result?.summary).toContain("5 deprecated.");
+});
+
+test("research_package uses the newest version in range and says when a version cannot be read", async () => {
+  // source: "^1.2.3" was checked at its floor, and an unreadable version did not say that advisories were checked for the latest.
+  const versions = ["1.2.3", "1.4.0", "1.9.0", "2.0.0"];
+  function widget(advisoryVersion: string, tags: Record<string, string> = { latest: "2.0.0" }): Record<string, Fixture> {
+    return {
+      "https://registry.npmjs.org/widget": {
+        body: {
+          name: "widget",
+          version: "2.0.0",
+          "dist-tags": tags,
+          versions: Object.fromEntries(versions.map((version) => [version, {}])),
+        },
+      },
+      "https://api.npmjs.org/downloads/point/last-week/widget": { body: { downloads: 10, package: "widget" } },
+      "https://api.npmjs.org/downloads/point/last-month/widget": { body: { downloads: 40, package: "widget" } },
+      [affectUrl("widget", advisoryVersion)]: { body: [] },
+    };
+  }
+
+  let fetchMock = mockFetch(widget("1.9.0"));
+  let rangeRejection: unknown = null;
+  let ranged: Awaited<ReturnType<typeof researchPackage>> | undefined;
+  try {
+    ranged = await researchPackage("widget", "^1.2.3");
+  } catch (error) {
+    rangeRejection = error;
+  }
+  expect(rangeRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("widget", "1.9.0")
+  );
+  expect(ranged?.security.checkedVersion).toBe("1.9.0");
+  expect(ranged?.versionsBehind).toBe(1);
+  expect(ranged?.versionNote).toBe(
+    'The range "^1.2.3" was read as 1.9.0, the version a fresh install would get.'
+  );
+
+  fetchMock = mockFetch(widget("2.0.0"));
+  let bananaRejection: unknown = null;
+  let banana: Awaited<ReturnType<typeof researchPackage>> | undefined;
+  try {
+    banana = await researchPackage("widget", "banana");
+  } catch (error) {
+    bananaRejection = error;
+  }
+  expect(bananaRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("widget", "2.0.0")
+  );
+  expect(banana?.security.checkedVersion).toBe("2.0.0");
+  expect(banana?.versionNote).toBe(
+    '"banana" is not a version, a range or a tag of this package. Advisories were checked for the latest version, 2.0.0.'
+  );
+  expect(banana !== undefined && "versionsBehind" in banana).toBe(false);
+
+  fetchMock = mockFetch(widget("1.4.0", { latest: "2.0.0", next: "1.4.0" }));
+  let tagRejection: unknown = null;
+  let tagged: Awaited<ReturnType<typeof researchPackage>> | undefined;
+  try {
+    tagged = await researchPackage("widget", "next");
+  } catch (error) {
+    tagRejection = error;
+  }
+  expect(tagRejection).toBeNull();
+  expect(String(fetchMock.mock.calls.find(([url]) => String(url).includes("advisories"))?.[0])).toBe(
+    affectUrl("widget", "1.4.0")
+  );
+  expect(tagged?.versionNote).toBe('The tag "next" points at 1.4.0.');
+  expect(tagged?.versionsBehind).toBe(2);
+});
+
+test("unknown tool arguments are refused", async () => {
+  // source: a removed framework or category argument, or a typo, was silently ignored.
+  const cases: Array<{ name: string; arguments: Record<string, unknown>; key: string }> = [
+    { name: "research_package", arguments: { package: "left-pad", currentVerison: "1" }, key: "currentVerison" },
+    { name: "compare_packages", arguments: { packages: ["a", "b"], extra: true }, key: "extra" },
+    { name: "find_alternatives", arguments: { package: "lodash", category: "ui" }, key: "category" },
+    { name: "check_security", arguments: { package: "lodash", framework: "react" }, key: "framework" },
+    { name: "analyze_package_json", arguments: { packageJson: { name: "app" }, typo: 1 }, key: "typo" },
+    { name: "exa_deep_search", arguments: { query: "q", unknown: true }, key: "unknown" },
+    { name: "exa_research", arguments: { instructions: "q", unknown: true }, key: "unknown" },
+    { name: "get_trending", arguments: { category: "testing", framework: "react" }, key: "framework" },
+  ];
+  for (const toolCase of cases) {
+    let rejection: unknown = null;
+    let result: Awaited<ReturnType<typeof handleToolCall>> | undefined;
+    try {
+      result = await handleToolCall({ params: { name: toolCase.name, arguments: toolCase.arguments } });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeNull();
+    expect(result?.isError).toBe(true);
+    expect(result?.content[0]?.text).toBe(
+      `Invalid arguments for ${toolCase.name}: ${toolCase.key}: Unrecognized key`
+    );
+  }
+});
+
+test("each advisory page gets its own timeout signal, and a timed out body is not an unexpected body", async () => {
+  // source: one 15 second timer was shared across advisory pages, and a timeout while reading the body was reported as an unexpected response body.
+  const first = affectUrl("lodash", "4.17.21");
+  const next = `${first}&page=2`;
+  const fetchMock = mockFetch({
+    [first]: { body: [], headers: { Link: `<${next}>; rel="next"` } },
+    [next]: { body: [] },
+  });
+  let pageRejection: unknown = null;
+  try {
+    await checkSecurityAdvisories("lodash", "4.17.21");
+  } catch (error) {
+    pageRejection = error;
+  }
+  expect(pageRejection).toBeNull();
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  const firstSignal = fetchMock.mock.calls[0]?.[1]?.signal;
+  const secondSignal = fetchMock.mock.calls[1]?.[1]?.signal;
+  expect(firstSignal).toBeInstanceOf(AbortSignal);
+  expect(secondSignal).toBeInstanceOf(AbortSignal);
+  expect(firstSignal).not.toBe(secondSignal);
+
+  const timedOut = new Response(new ReadableStream({
+    start(controller) {
+      controller.error(new DOMException("The operation was aborted due to timeout", "TimeoutError"));
+    },
+  }));
+  mockFetch({ [first]: timedOut });
+  const error = await checkSecurityAdvisories("lodash", "4.17.21").catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(AdvisoryLookupError);
+  expect(error).toMatchObject({
+    message: "GitHub advisory lookup failed for lodash: the request timed out",
+  });
+});
+
+function comparedPackage(name: string, downloads: number, stars: number): Record<string, Fixture> {
+  return {
+    ...packageBundle(name, {
+      name,
+      version: "1.0.0",
+      "dist-tags": { latest: "1.0.0" },
+      repository: `https://github.com/acme/${name}`,
+    }, downloads),
+    [`https://api.github.com/repos/acme/${name}`]: {
+      body: {
+        name,
+        full_name: `acme/${name}`,
+        description: null,
+        stargazers_count: stars,
+        forks_count: 0,
+        open_issues_count: 0,
+        license: null,
+        pushed_at: "2024-01-01T00:00:00Z",
+        updated_at: "2024-01-01T00:00:00Z",
+        archived: false,
+        disabled: false,
+      },
+    },
+  };
+}
+
+test("compare_packages does not crown one package and keeps a failed read in the result", async () => {
+  // source: a single count was called the most, a tie was called a winner, and an unexpected error while reading one package rejected the whole comparison.
+  mockFetch({
+    ...comparedPackage("solo", 5000, 12),
+    "https://registry.npmjs.org/gone": { status: 404, body: {} },
+  });
+  let singleRejection: unknown = null;
+  let single: Awaited<ReturnType<typeof comparePackages>> | undefined;
+  try {
+    single = await comparePackages(["solo", "gone"]);
+  } catch (error) {
+    singleRejection = error;
+  }
+  expect(singleRejection).toBeNull();
+  expect(single?.recommendation ?? "").not.toContain("has the most");
+  expect(single?.recommendation ?? "").not.toContain("have the same");
+  expect(single?.recommendation).toBe("Not found on npm: gone.");
+
+  mockFetch({
+    ...comparedPackage("alpha", 1000, 40),
+    ...comparedPackage("beta", 1000, 40),
+  });
+  let tieRejection: unknown = null;
+  let tied: Awaited<ReturnType<typeof comparePackages>> | undefined;
+  try {
+    tied = await comparePackages(["alpha", "beta"]);
+  } catch (error) {
+    tieRejection = error;
+  }
+  expect(tieRejection).toBeNull();
+  expect(tied?.recommendation).toBe(
+    '"alpha" and "beta" have the same weekly downloads (1,000). "alpha" and "beta" have the same GitHub stars (40).'
+  );
+
+  mockFetch({
+    "https://registry.npmjs.org/broken": {
+      body: { version: "1.0.0", "dist-tags": { latest: "1.0.0" } },
+    },
+    "https://api.npmjs.org/downloads/point/last-week/broken": { body: { downloads: 1, package: "broken" } },
+    ...packageBundle("kept", { name: "kept", version: "1.2.0", "dist-tags": { latest: "1.2.0" } }, 8),
+  });
+  let failedRejection: unknown = null;
+  let failed: Awaited<ReturnType<typeof comparePackages>> | undefined;
+  try {
+    failed = await comparePackages(["broken", "kept"]);
+  } catch (error) {
+    failedRejection = error;
+  }
+  expect(failedRejection).toBeNull();
+  expect(failed?.packages.find((pkg) => pkg.name === "broken")).toEqual({
+    name: "broken",
+    status: "lookup-failed",
+    error: "undefined is not an object (evaluating 'pkg.name.startsWith')",
+  });
+  expect(failed?.packages.find((pkg) => pkg.name === "kept")?.status).toBe("found");
+});
+
+test("parseGitHubRepo rejects dot and dotdot path segments", () => {
+  // source: an owner or repository named "." or ".." was parsed as a GitHub repository.
+  expect(parseGitHubRepo("https://github.com/owner/..")).toBeNull();
+  expect(parseGitHubRepo("https://github.com/./repo")).toBeNull();
+});
+
+test("find_alternatives returns fresh pros and cons arrays", async () => {
+  // source: changing the pros array of one find_alternatives result changed the next answer.
+  function altBundle(name: string, downloads: number): Record<string, Fixture> {
+    const encoded = encodeURIComponent(name);
+    return {
+      [`https://registry.npmjs.org/${encoded}`]: {
+        body: { name, version: "1.0.0", "dist-tags": { latest: "1.0.0" }, description: name },
+      },
+      [`https://api.npmjs.org/downloads/point/last-week/${encoded}`]: {
+        body: { downloads, package: name },
+      },
+    };
+  }
+  mockFetch({
+    ...altBundle("date-fns", 300),
+    ...altBundle("dayjs", 200),
+    ...altBundle("luxon", 100),
+  });
+  let firstRejection: unknown = null;
+  let first: Awaited<ReturnType<typeof findAlternatives>> | undefined;
+  try {
+    first = await findAlternatives("moment");
+  } catch (error) {
+    firstRejection = error;
+  }
+  expect(firstRejection).toBeNull();
+  const firstPros = first?.alternatives.find((item) => item.name === "dayjs")?.pros;
+  expect(firstPros).toEqual(["API modeled on Moment", "Immutable date objects", "Features are added through plugins"]);
+  firstPros?.push("changed by the caller");
+  let secondRejection: unknown = null;
+  let second: Awaited<ReturnType<typeof findAlternatives>> | undefined;
+  try {
+    second = await findAlternatives("moment");
+  } catch (error) {
+    secondRejection = error;
+  }
+  expect(secondRejection).toBeNull();
+  expect(second?.alternatives.find((item) => item.name === "dayjs")?.pros).toEqual([
+    "API modeled on Moment",
+    "Immutable date objects",
+    "Features are added through plugins",
+  ]);
+});
+
+test("cliEntryMatches treats a directory entry as its index.js", () => {
+  // source: node dist compared the folder with dist/index.js and did not start the server.
+  const root = mkdtempSync(join(tmpdir(), "eco-cli-"));
+  try {
+    const dir = join(root, "dist");
+    mkdirSync(dir);
+    const indexFile = join(dir, "index.js");
+    writeFileSync(indexFile, "");
+    const fileEntry = join(root, "other.js");
+    writeFileSync(fileEntry, "");
+    expect(cliEntryMatches(indexFile, dir)).toBe(true);
+    expect(cliEntryMatches(fileEntry, fileEntry)).toBe(true);
+    expect(cliEntryMatches(indexFile, fileEntry)).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

@@ -42,6 +42,17 @@ export interface SecurityAdvisory {
   url?: string;
 }
 
+function isTimeoutOrAbort(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("name" in error)) return false;
+  return error.name === "TimeoutError" || error.name === "AbortError";
+}
+
+function timedOut(packageName: string): AdvisoryLookupError {
+  return new AdvisoryLookupError(
+    `GitHub advisory lookup failed for ${packageName}: the request timed out`
+  );
+}
+
 function normalizeSeverity(value: string | undefined): SecurityAdvisory["severity"] {
   switch (value?.toLowerCase()) {
     case "critical":
@@ -79,13 +90,12 @@ export async function checkSecurityAdvisories(
     const affects = `${packageName}@${version}`;
     let url: string | undefined =
       `${GITHUB_ADVISORY_API}?ecosystem=npm&per_page=100&affects=${encodeURIComponent(affects)}`;
-    const requestInit: RequestInit = {
-      headers,
-      signal: AbortSignal.timeout(15_000),
-    };
 
     for (let page = 0; url && page < 10; page++) {
-      const response: Response = await fetch(url, requestInit);
+      const response: Response = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(15_000),
+      });
       if (!response.ok) {
         const base = `GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`;
         const rateLimited = response.status === 403 || response.status === 429;
@@ -96,8 +106,18 @@ export async function checkSecurityAdvisories(
         );
       }
 
-      const data: GitHubAdvisory[] | null = await response.json().catch(() => null);
-      if (!Array.isArray(data)) {
+      let data: GitHubAdvisory[];
+      try {
+        const parsed: unknown = await response.json();
+        if (!Array.isArray(parsed)) {
+          throw new AdvisoryLookupError(
+            `GitHub advisory lookup failed for ${packageName}: unexpected response body`
+          );
+        }
+        data = parsed as GitHubAdvisory[];
+      } catch (error) {
+        if (error instanceof AdvisoryLookupError) throw error;
+        if (isTimeoutOrAbort(error)) throw timedOut(packageName);
         throw new AdvisoryLookupError(
           `GitHub advisory lookup failed for ${packageName}: unexpected response body`
         );
@@ -136,6 +156,7 @@ export async function checkSecurityAdvisories(
     }
   } catch (error) {
     if (error instanceof AdvisoryLookupError) throw error;
+    if (isTimeoutOrAbort(error)) throw timedOut(packageName);
     throw new AdvisoryLookupError(
       `GitHub advisory lookup failed for ${packageName}: ${error instanceof Error ? error.message : String(error)}`
     );

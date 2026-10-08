@@ -7,14 +7,7 @@ import semver from "semver";
 import { deprecationMessage, fetchDownloads, fetchPackageData, hasTypeScriptSupport, repositoryUrl, } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
 import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
-function readableVersion(input) {
-    const exact = semver.valid(input);
-    if (exact)
-        return exact;
-    if (semver.validRange(input) === null)
-        return null;
-    return semver.minVersion(input)?.version ?? null;
-}
+import { resolveVersion, versionResolutionSentence } from "./version-resolve.js";
 function stableVersionsAhead(versions, current) {
     let count = 0;
     for (const version of Object.keys(versions ?? {})) {
@@ -32,16 +25,28 @@ export async function researchPackage(packageName, currentVersion) {
     if (!npmData) {
         throw new Error(`Package "${packageName}" not found on npm`);
     }
-    const readable = currentVersion ? readableVersion(currentVersion) : null;
-    const checkedVersion = readable ?? npmData.version;
+    let checkedVersion = npmData.version;
     let versionNote;
     let versionsBehind;
-    if (currentVersion) {
-        if (!readable) {
-            versionNote = `The version "${currentVersion}" could not be compared.`;
+    if (currentVersion === undefined) {
+        const resolved = resolveVersion(undefined, npmData);
+        if (resolved.kind !== "none")
+            checkedVersion = resolved.version;
+    }
+    else {
+        const resolved = resolveVersion(currentVersion, npmData);
+        if (resolved.kind === "none") {
+            versionNote = `${resolved.reason} Advisories were checked for the latest version, ${npmData.version}.`;
+            checkedVersion = npmData.version;
         }
         else {
-            versionsBehind = stableVersionsAhead(npmData.versions, readable);
+            checkedVersion = resolved.version;
+            if (semver.valid(resolved.version)) {
+                versionsBehind = stableVersionsAhead(npmData.versions, resolved.version);
+            }
+            if (resolved.kind === "range" || resolved.kind === "tag") {
+                versionNote = versionResolutionSentence(resolved);
+            }
         }
     }
     let securityError;

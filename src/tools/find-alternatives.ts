@@ -148,7 +148,8 @@ function getProsAndCons(packageName: string): { pros: string[]; cons: string[] }
   if (!Object.hasOwn(ALTERNATIVE_NOTES, packageName)) {
     return { pros: [], cons: [] };
   }
-  return ALTERNATIVE_NOTES[packageName];
+  const notes = ALTERNATIVE_NOTES[packageName];
+  return { pros: [...notes.pros], cons: [...notes.cons] };
 }
 
 function recommendationFor(packageName: string, alternatives: Alternative[]): string | undefined {

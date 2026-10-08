@@ -4,7 +4,7 @@
  * Compare multiple npm packages side-by-side.
  */
 
-import { fetchPackageData, fetchDownloads, hasTypeScriptSupport, NpmLookupError, repositoryUrl } from "./npm-client.js";
+import { fetchPackageData, fetchDownloads, hasTypeScriptSupport, repositoryUrl } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
 
 export interface PackageComparisonEntry {
@@ -30,17 +30,24 @@ function formatCount(value: number): string {
   return value.toLocaleString("en-US");
 }
 
-function leader(
+function metricSentence(
   entries: PackageComparisonEntry[],
-  key: "weeklyDownloads" | "githubStars"
-): PackageComparisonEntry | undefined {
-  let best: PackageComparisonEntry | undefined;
-  for (const entry of entries) {
-    const value = entry[key];
-    if (typeof value !== "number") continue;
-    if (!best || value > (best[key] as number)) best = entry;
+  key: "weeklyDownloads" | "githubStars",
+  noun: string
+): string | undefined {
+  const withValue = entries.filter((entry) => typeof entry[key] === "number");
+  if (withValue.length < 2) return undefined;
+  let max = withValue[0][key] as number;
+  for (const entry of withValue) {
+    const value = entry[key] as number;
+    if (value > max) max = value;
   }
-  return best;
+  const leaders = withValue.filter((entry) => entry[key] === max);
+  const formatted = formatCount(max);
+  if (leaders.length >= 2) {
+    return `"${leaders[0].name}" and "${leaders[1].name}" have the same ${noun} (${formatted}).`;
+  }
+  return `"${leaders[0].name}" has the most ${noun} (${formatted}).`;
 }
 
 function recommendationFor(results: PackageComparisonEntry[]): string | undefined {
@@ -50,18 +57,10 @@ function recommendationFor(results: PackageComparisonEntry[]): string | undefine
   if (found.length === 0 && failed.length === 0) return undefined;
 
   const sentences: string[] = [];
-  const downloadLeader = leader(found, "weeklyDownloads");
-  if (downloadLeader && typeof downloadLeader.weeklyDownloads === "number") {
-    sentences.push(
-      `"${downloadLeader.name}" has the most weekly downloads (${formatCount(downloadLeader.weeklyDownloads)}).`
-    );
-  }
-  const starLeader = leader(found, "githubStars");
-  if (starLeader && typeof starLeader.githubStars === "number") {
-    sentences.push(
-      `"${starLeader.name}" has the most GitHub stars (${formatCount(starLeader.githubStars)}).`
-    );
-  }
+  const downloadSentence = metricSentence(found, "weeklyDownloads", "weekly downloads");
+  if (downloadSentence) sentences.push(downloadSentence);
+  const starSentence = metricSentence(found, "githubStars", "GitHub stars");
+  if (starSentence) sentences.push(starSentence);
   const missingDownloads = found
     .filter((entry) => typeof entry.weeklyDownloads !== "number")
     .map((entry) => entry.name);
@@ -112,10 +111,8 @@ export async function comparePackages(packages: string[]): Promise<PackageCompar
           maintainers: npmData.maintainers?.length ?? 0,
         };
       } catch (error) {
-        if (error instanceof NpmLookupError) {
-          return { name: pkg, status: "lookup-failed", error: error.message };
-        }
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        return { name: pkg, status: "lookup-failed", error: message };
       }
     })
   );

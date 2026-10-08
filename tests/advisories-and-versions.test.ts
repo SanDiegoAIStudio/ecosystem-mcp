@@ -325,7 +325,7 @@ test("dependency analysis filters advisories by valid dependency versions", asyn
     ...registryFixtures("lodash", "4.17.21"),
     ...registryFixtures("other", "1.0.0"),
     [`${lodashUrl}%404.17.20`]: { body: [] },
-    [otherUrl]: { body: [] },
+    [`${otherUrl}%401.0.0`]: { body: [] },
   });
 
   await analyzePackageJson({ dependencies: { lodash: "4.17.20", other: "latest" } });
@@ -333,7 +333,7 @@ test("dependency analysis filters advisories by valid dependency versions", asyn
   const lodashRequest = urls.find((url) => url.startsWith(lodashUrl));
   const otherRequest = urls.find((url) => url.startsWith(otherUrl));
   expect(lodashRequest).toContain("affects=lodash%404.17.20");
-  expect(otherRequest).toBeUndefined();
+  expect(otherRequest).toBe(`${otherUrl}%401.0.0`);
 });
 
 test("dependency analysis detects patch and major updates from dist-tags", async () => {
@@ -348,10 +348,21 @@ test("dependency analysis detects patch and major updates from dist-tags", async
   const result = await analyzePackageJson({ dependencies: { lodash: "4.17.20", zod: "^3.0.0" } });
   expect(result.dependencies).toMatchObject([
     { name: "lodash", current: "4.17.20", latest: "4.17.21", status: "patch", securityIssues: 0 },
-    { name: "zod", current: "3.0.0", latest: "4.1.0", status: "major", securityIssues: 0 },
+    {
+      name: "zod",
+      spec: "^3.0.0",
+      current: "^3.0.0",
+      latest: "4.1.0",
+      status: "unknown",
+      resolvedFrom: "none",
+      securityIssues: null,
+      recommendation: 'No published version satisfies "^3.0.0".',
+    },
   ]);
-  expect(result.outdatedCount).toBe(2);
-  expect(result.summary).toBe("Analyzed 2 dependencies. 2 packages have updates available.");
+  expect(result.outdatedCount).toBe(1);
+  expect(result.summary).toBe(
+    "Analyzed 2 dependencies. 1 packages have updates available. 1 could not be compared. Advisories were not checked for 1 package(s)."
+  );
 });
 
 test("dependency analysis records and counts failed security lookups", async () => {
@@ -381,7 +392,9 @@ test("dependency analysis records and counts failed security lookups", async () 
   });
   expect(result.devDependencies?.[0]?.securityError).toBeUndefined();
   expect(result.securityIssueCount).toBe(0);
-  expect(result.summary).toBe("Analyzed 3 dependencies. 2 packages have updates available. 1 could not be compared. Security lookup failed for 1 package(s). Advisories were not checked for 1 package(s).");
+  expect(result.summary).toBe(
+    "Analyzed 3 dependencies. 1 packages have updates available. 2 could not be compared. Security lookup failed for 1 package(s). Advisories were not checked for 2 package(s). GitHub's rate limit was reached. Set GITHUB_TOKEN and run it again for the missing advisory counts."
+  );
 });
 
 test("research uses the latest dist-tag for version and publish information", async () => {

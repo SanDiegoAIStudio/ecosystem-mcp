@@ -30,4 +30,5 @@ export declare function handleToolCall(request: {
         arguments?: unknown;
     };
 }): Promise<ToolTextResult>;
+export declare function cliEntryMatches(modulePath: string, entryPath: string): boolean;
 export {};

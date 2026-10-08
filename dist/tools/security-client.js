@@ -10,6 +10,14 @@ export class AdvisoryLookupError extends Error {
         this.name = "AdvisoryLookupError";
     }
 }
+function isTimeoutOrAbort(error) {
+    if (typeof error !== "object" || error === null || !("name" in error))
+        return false;
+    return error.name === "TimeoutError" || error.name === "AbortError";
+}
+function timedOut(packageName) {
+    return new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: the request timed out`);
+}
 function normalizeSeverity(value) {
     switch (value?.toLowerCase()) {
         case "critical":
@@ -39,12 +47,11 @@ export async function checkSecurityAdvisories(packageName, version) {
         }
         const affects = `${packageName}@${version}`;
         let url = `${GITHUB_ADVISORY_API}?ecosystem=npm&per_page=100&affects=${encodeURIComponent(affects)}`;
-        const requestInit = {
-            headers,
-            signal: AbortSignal.timeout(15_000),
-        };
         for (let page = 0; url && page < 10; page++) {
-            const response = await fetch(url, requestInit);
+            const response = await fetch(url, {
+                headers,
+                signal: AbortSignal.timeout(15_000),
+            });
             if (!response.ok) {
                 const base = `GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`;
                 const rateLimited = response.status === 403 || response.status === 429;
@@ -52,8 +59,19 @@ export async function checkSecurityAdvisories(packageName, version) {
                     ? `${base}. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.`
                     : base);
             }
-            const data = await response.json().catch(() => null);
-            if (!Array.isArray(data)) {
+            let data;
+            try {
+                const parsed = await response.json();
+                if (!Array.isArray(parsed)) {
+                    throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: unexpected response body`);
+                }
+                data = parsed;
+            }
+            catch (error) {
+                if (error instanceof AdvisoryLookupError)
+                    throw error;
+                if (isTimeoutOrAbort(error))
+                    throw timedOut(packageName);
                 throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: unexpected response body`);
             }
             for (const advisory of data) {
@@ -86,6 +104,8 @@ export async function checkSecurityAdvisories(packageName, version) {
     catch (error) {
         if (error instanceof AdvisoryLookupError)
             throw error;
+        if (isTimeoutOrAbort(error))
+            throw timedOut(packageName);
         throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return advisories;

@@ -14,6 +14,8 @@ function ownerAndRepo(path, bare) {
     let repo = parts[1];
     if (repo.endsWith(".git"))
         repo = repo.slice(0, -4);
+    if (owner === "." || owner === ".." || repo === "." || repo === "..")
+        return null;
     if (!/^[\w-]+$/.test(owner) || !/^[\w.-]+$/.test(repo))
         return null;
     return { owner, repo };

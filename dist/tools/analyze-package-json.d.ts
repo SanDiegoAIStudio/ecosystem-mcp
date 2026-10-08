@@ -5,8 +5,10 @@
  */
 export interface DependencyAnalysis {
     name: string;
+    spec: string;
     current: string;
     latest?: string;
+    resolvedFrom?: "latest" | "range" | "tag" | "none";
     status: "up-to-date" | "patch" | "minor" | "major" | "unknown";
     securityIssues: number | null;
     securityError?: string;

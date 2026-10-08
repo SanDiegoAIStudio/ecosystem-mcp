@@ -19,5 +19,6 @@ export interface SecurityCheckResult {
     };
     advisories?: SecurityAdvisory[];
     recommendation?: string;
+    resolvedFrom?: "exact" | "latest" | "range" | "tag";
 }
 export declare function checkSecurity(packageName: string, version?: string): Promise<SecurityCheckResult>;

@@ -17,6 +17,8 @@ The server lists eight tools.
 | `exa_research` | Longer research task through the Exa Research API | `EXA_API_KEY` |
 | `get_trending` | Popular packages in a category, from a curated list | none |
 
+A range such as `^1.2.0` is read the way a fresh install resolves it: the latest version when that fits the range, otherwise the newest published version that fits. A lockfile can hold an older version, and these tools do not read lockfiles.
+
 ### Environment variables
 
 - `EXA_API_KEY`: required by `exa_deep_search` and `exa_research` only. Without it those two tools answer `EXA_API_KEY required for Exa Deep client` and the other six keep working.

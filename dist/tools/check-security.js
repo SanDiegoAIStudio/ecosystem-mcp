@@ -3,23 +3,11 @@
  *
  * Check for security advisories affecting a package.
  */
-import semver from "semver";
 import { checkSecurityAdvisories } from "./security-client.js";
 import { fetchPackageData } from "./npm-client.js";
-function versionToCheck(given, latest) {
-    if (given === undefined || given === "latest")
-        return latest;
-    const exact = semver.valid(given);
-    if (exact)
-        return exact;
-    if (semver.validRange(given) !== null) {
-        const min = semver.minVersion(given);
-        if (min)
-            return min.version;
-    }
-    throw new Error(`Version "${given}" is not a version or range that can be checked.`);
-}
-function recommendationFor(packageName, checkedVersion, latestVersion, advisories, bySeverity) {
+import { resolveVersion, versionResolutionSentence } from "./version-resolve.js";
+function recommendationFor(packageName, latestVersion, advisories, bySeverity, resolved) {
+    const checkedVersion = resolved.version;
     const subject = `"${packageName}" ${checkedVersion}`;
     let sentence;
     if (advisories.length === 0) {
@@ -43,10 +31,17 @@ function recommendationFor(packageName, checkedVersion, latestVersion, advisorie
             ? `1 advisory affects ${subject}.`
             : `${count} advisories affect ${subject}.`;
     }
+    let text;
     if (checkedVersion === latestVersion) {
-        return `${sentence} That is the latest version.`;
+        text = `${sentence} That is the latest version.`;
     }
-    return `${sentence} Latest version: ${latestVersion}.`;
+    else {
+        text = `${sentence} Latest version: ${latestVersion}.`;
+    }
+    if (resolved.kind === "range" || resolved.kind === "tag") {
+        text += ` ${versionResolutionSentence(resolved)}`;
+    }
+    return text;
 }
 export async function checkSecurity(packageName, version) {
     const npmData = await fetchPackageData(packageName);
@@ -58,7 +53,10 @@ export async function checkSecurity(packageName, version) {
             recommendation: `Package "${packageName}" was not found on npm, so no advisory lookup is meaningful.`,
         };
     }
-    const checkedVersion = versionToCheck(version, npmData.version);
+    const resolved = resolveVersion(version, npmData);
+    if (resolved.kind === "none")
+        throw new Error(resolved.reason);
+    const checkedVersion = resolved.version;
     const advisories = await checkSecurityAdvisories(packageName, checkedVersion);
     const bySeverity = {
         critical: advisories.filter((advisory) => advisory.severity === "critical").length,
@@ -75,6 +73,7 @@ export async function checkSecurity(packageName, version) {
         totalAdvisories: advisories.length,
         bySeverity,
         advisories,
-        recommendation: recommendationFor(packageName, checkedVersion, npmData.version, advisories, bySeverity),
+        resolvedFrom: resolved.kind,
+        recommendation: recommendationFor(packageName, npmData.version, advisories, bySeverity, resolved),
     };
 }

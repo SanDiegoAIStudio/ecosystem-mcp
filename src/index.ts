@@ -16,7 +16,8 @@
  * - get_trending: Get trending packages in a category
  */
 
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -44,7 +45,7 @@ import {
 export const tools: Tool[] = [
   {
     name: "research_package",
-    description: "Research one npm package. Returns the latest version, weekly and monthly downloads, GitHub stars, forks, open issues, last push and whether the repository is archived, the security advisories that affect one version (the version in use when currentVersion is given, otherwise the latest), days since the last publish, maintainer count, whether type definitions are bundled, the license, and npm's deprecation notice when there is one. With currentVersion it also returns how many stable releases behind that version is.",
+    description: "Research one npm package. Returns the latest version, weekly and monthly downloads, GitHub stars, forks, open issues, last push and whether the repository is archived, the security advisories that affect one version (the version in use when currentVersion is given, otherwise the latest), days since the last publish, maintainer count, whether type definitions are included, the license, and npm's deprecation notice when there is one. With currentVersion it also returns how many stable releases behind that version is.",
     inputSchema: {
       type: "object",
       properties: {
@@ -54,7 +55,7 @@ export const tools: Tool[] = [
         },
         currentVersion: {
           type: "string",
-          description: "Optional: the version or range in use",
+          description: "Optional: the version, range or tag in use",
         },
       },
       required: ["package"],
@@ -62,7 +63,7 @@ export const tools: Tool[] = [
   },
   {
     name: "compare_packages",
-    description: "Compare 2 to 5 npm packages. For each one: latest version, weekly downloads, GitHub stars, last publish date, whether type definitions are bundled, license and maintainer count. A package that is missing or could not be read is marked as such.",
+    description: "Compare 2 to 5 npm packages. For each one: latest version, weekly downloads, GitHub stars, last publish date, whether type definitions are included, license and maintainer count. A package that is missing or could not be read is marked as such.",
     inputSchema: {
       type: "object",
       properties: {
@@ -93,7 +94,7 @@ export const tools: Tool[] = [
   },
   {
     name: "check_security",
-    description: "List the security advisories that affect one version of an npm package: the version given, or the latest version when none is given. Returns the version checked, counts by severity, and each advisory with its vulnerable and patched ranges.",
+    description: "List the security advisories that affect one version of an npm package: the version given, or the latest version when none is given. A range is read as the version a fresh install would get. Returns the version checked, counts by severity, and each advisory with its vulnerable and patched ranges.",
     inputSchema: {
       type: "object",
       properties: {
@@ -111,7 +112,7 @@ export const tools: Tool[] = [
   },
   {
     name: "analyze_package_json",
-    description: "Check a package.json's dependencies against npm. For each one: whether it is behind (patch, minor or major), how many advisories affect the version in use, and npm's deprecation notice. It looks at the first 20 dependencies and the first 10 devDependencies and says so when there are more. Dependencies that point at a workspace, a file, a git repository or a URL are not looked up.",
+    description: "Check a package.json's dependencies against npm. A range is read as the version a fresh install would get, since no lockfile is read. For each one: whether it is behind (patch, minor or major), how many advisories affect the version in use, and npm's deprecation notice. It looks at the first 20 dependencies and the first 10 devDependencies and says so when there are more. Dependencies that point at a workspace, a file, a git repository or a URL are not looked up.",
     inputSchema: {
       type: "object",
       properties: {
@@ -202,13 +203,13 @@ Polls until completion and returns the final result.`,
   },
   {
     name: "get_trending",
-    description: "Popular packages in a category, from a curated list, with weekly downloads, GitHub stars and a rising, stable or declining label that compares the last week with the last month. Categories: state-management, testing, ui-components, date-time, validation, http-client, orm, bundler, css-framework, animation",
+    description: "Popular packages in a category, from a curated list, with weekly downloads, GitHub stars and a rising, stable or declining label that compares the last week with the last month.",
     inputSchema: {
       type: "object",
       properties: {
         category: {
           type: "string",
-          description: "Category to search",
+          description: "Category to search: state-management, testing, ui-components, date-time, validation, http-client, orm, bundler, css-framework, animation",
           enum: [
             "state-management",
             "testing",
@@ -238,20 +239,20 @@ const dependencyMap = z.record(z.string(), z.string());
 const researchPackageArgs = z.object({
   package: nonEmptyString,
   currentVersion: z.string().optional(),
-});
+}).strict();
 
 const comparePackagesArgs = z.object({
   packages: z.array(nonEmptyString).min(2).max(5),
-});
+}).strict();
 
 const findAlternativesArgs = z.object({
   package: nonEmptyString,
-});
+}).strict();
 
 const checkSecurityArgs = z.object({
   package: nonEmptyString,
   version: z.string().optional(),
-});
+}).strict();
 
 const analyzePackageJsonArgs = z.object({
   packageJson: z
@@ -261,7 +262,7 @@ const analyzePackageJsonArgs = z.object({
     })
     .passthrough(),
   checkDevDeps: z.boolean().optional(),
-});
+}).strict();
 
 const exaCategory = z.enum([
   "research paper",
@@ -281,13 +282,13 @@ const exaDeepSearchArgs = z.object({
   numResults: z.number().optional(),
   includeDomains: z.array(z.string()).optional(),
   category: exaCategory.optional(),
-});
+}).strict();
 
 const exaResearchArgs = z.object({
   instructions: nonEmptyString,
   outputSchema: z.record(z.string(), z.unknown()).optional(),
   model: z.enum(["exa-research", "exa-research-pro"]).optional(),
-});
+}).strict();
 
 const getTrendingArgs = z.object({
   category: z.enum([
@@ -302,7 +303,7 @@ const getTrendingArgs = z.object({
     "css-framework",
     "animation",
   ]),
-});
+}).strict();
 
 interface ToolTextResult {
   content: Array<{ type: "text"; text: string }>;
@@ -311,8 +312,13 @@ interface ToolTextResult {
 
 function invalidArguments(tool: string, error: z.ZodError): ToolTextResult {
   const issue = error.issues[0];
-  const field = issue && issue.path.length > 0 ? issue.path.map(String).join(".") : "arguments";
-  const detail = issue?.message ?? "Invalid input";
+  let field = issue && issue.path.length > 0 ? issue.path.map(String).join(".") : "arguments";
+  let detail = issue?.message ?? "Invalid input";
+  if (issue?.code === "unrecognized_keys" && issue.keys[0]) {
+    const key = issue.keys[0];
+    field = issue.path.length > 0 ? `${field}.${key}` : key;
+    detail = "Unrecognized key";
+  }
   return {
     content: [
       {
@@ -492,14 +498,23 @@ async function main() {
   console.error("Ecosystem MCP server running on stdio");
 }
 
-function runningAsCli(): boolean {
-  const entry = process.argv[1];
-  if (!entry) return false;
+export function cliEntryMatches(modulePath: string, entryPath: string): boolean {
   try {
-    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entry);
+    const moduleReal = realpathSync(modulePath);
+    const entryReal = realpathSync(entryPath);
+    if (statSync(entryReal).isDirectory()) {
+      return moduleReal === realpathSync(join(entryReal, "index.js"));
+    }
+    return moduleReal === entryReal;
   } catch {
     return false;
   }
+}
+
+function runningAsCli(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return cliEntryMatches(fileURLToPath(import.meta.url), entry);
 }
 
 if (runningAsCli()) {

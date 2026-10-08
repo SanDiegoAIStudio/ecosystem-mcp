@@ -6,22 +6,10 @@
 import semver from "semver";
 import { deprecationMessage, fetchDownloads, fetchPackageData, NpmLookupError, } from "./npm-client.js";
 import { AdvisoryLookupError, checkSecurityAdvisories } from "./security-client.js";
+import { isRegistrySpec, resolveVersion } from "./version-resolve.js";
 const DEPENDENCY_LIMIT = 20;
 const DEV_DEPENDENCY_LIMIT = 10;
 const LOOKUP_CONCURRENCY = 5;
-const NON_RANGE_PREFIX = /^(?:workspace:|npm:|file:|link:|git\+|git:|github:|gitlab:|bitbucket:|http:|https:)/i;
-function versionFromSpec(spec) {
-    if (spec === "" || spec === "*" || spec === "latest")
-        return null;
-    if (NON_RANGE_PREFIX.test(spec))
-        return null;
-    const exact = semver.valid(spec);
-    if (exact)
-        return exact;
-    if (semver.validRange(spec) === null)
-        return null;
-    return semver.minVersion(spec)?.version ?? null;
-}
 async function mapWithLimit(items, limit, fn) {
     if (items.length === 0)
         return [];
@@ -47,16 +35,16 @@ function deprecatedField(pkg) {
     return deprecated ? { deprecated } : {};
 }
 async function inspectDependency(name, versionSpec) {
-    if (NON_RANGE_PREFIX.test(versionSpec)) {
+    if (!isRegistrySpec(versionSpec)) {
         return {
             name,
+            spec: versionSpec,
             current: versionSpec,
             status: "unknown",
             securityIssues: null,
             recommendation: `Version spec "${versionSpec}" does not point at an npm registry version, so it was not looked up.`,
         };
     }
-    const currentVersion = versionFromSpec(versionSpec);
     let npmData;
     let downloads;
     try {
@@ -69,6 +57,7 @@ async function inspectDependency(name, versionSpec) {
         if (error instanceof NpmLookupError) {
             return {
                 name,
+                spec: versionSpec,
                 current: versionSpec,
                 status: "unknown",
                 securityIssues: null,
@@ -77,27 +66,32 @@ async function inspectDependency(name, versionSpec) {
         }
         throw error;
     }
-    if (!currentVersion) {
-        return {
-            name,
-            current: versionSpec,
-            latest: npmData?.version,
-            status: "unknown",
-            securityIssues: null,
-            weeklyDownloads: downloads?.downloads,
-            recommendation: `Version spec "${versionSpec}" is not a plain version or range, so it was not compared and its advisories were not checked.`,
-            ...deprecatedField(npmData),
-        };
-    }
     if (!npmData) {
         return {
             name,
-            current: currentVersion,
+            spec: versionSpec,
+            current: versionSpec,
             status: "unknown",
             securityIssues: null,
             recommendation: "Package not found on npm",
         };
     }
+    const resolved = resolveVersion(versionSpec, npmData);
+    if (resolved.kind === "none") {
+        return {
+            name,
+            spec: versionSpec,
+            current: versionSpec,
+            resolvedFrom: "none",
+            latest: npmData.version,
+            status: "unknown",
+            securityIssues: null,
+            weeklyDownloads: downloads?.downloads,
+            recommendation: resolved.reason,
+            ...deprecatedField(npmData),
+        };
+    }
+    const currentVersion = resolved.version;
     let securityError;
     let securityIssues = null;
     let advisories = [];
@@ -149,7 +143,9 @@ async function inspectDependency(name, versionSpec) {
     }
     return {
         name,
+        spec: versionSpec,
         current: currentVersion,
+        ...(resolved.kind === "exact" ? {} : { resolvedFrom: resolved.kind }),
         latest: npmData.version,
         status,
         securityIssues,
@@ -167,6 +163,7 @@ async function analyzeDependency(name, versionSpec) {
         const message = error instanceof Error ? error.message : String(error);
         return {
             name,
+            spec: versionSpec,
             current: versionSpec,
             status: "unknown",
             securityIssues: null,
@@ -209,6 +206,14 @@ function buildSummary(allResults, limitNotes, securityIssueCount, outdatedCount,
     if (notChecked > 0) {
         parts.push(`Advisories were not checked for ${notChecked} package(s).`);
     }
+    if (allResults.some((result) => result.securityError?.includes("rate limit"))) {
+        parts.push("GitHub's rate limit was reached. Set GITHUB_TOKEN and run it again for the missing advisory counts.");
+    }
+    if (allResults.some((result) => result.resolvedFrom === "range" ||
+        result.resolvedFrom === "tag" ||
+        result.resolvedFrom === "latest")) {
+        parts.push("Ranges and tags were read as a fresh install would resolve them. A lockfile may hold an older version.");
+    }
     return parts.join(" ");
 }
 export async function analyzePackageJson(packageJson, checkDevDeps = true) {
@@ -236,9 +241,14 @@ export async function analyzePackageJson(packageJson, checkDevDeps = true) {
             ? `${dep.name}: 1 advisory affects ${dep.current}`
             : `${dep.name}: ${count} advisories affect ${dep.current}`);
     }
+    let deprecatedListed = 0;
     for (const dep of allResults) {
-        if (dep.deprecated)
-            topPriorities.push(`${dep.name} is deprecated on npm`);
+        if (!dep.deprecated)
+            continue;
+        if (deprecatedListed === 3)
+            break;
+        topPriorities.push(`${dep.name} is deprecated on npm`);
+        deprecatedListed += 1;
     }
     const majorUpdates = allResults.filter((result) => result.status === "major");
     for (const dep of majorUpdates.slice(0, 2)) {

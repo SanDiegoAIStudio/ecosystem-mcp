@@ -111,7 +111,8 @@ function getProsAndCons(packageName) {
     if (!Object.hasOwn(ALTERNATIVE_NOTES, packageName)) {
         return { pros: [], cons: [] };
     }
-    return ALTERNATIVE_NOTES[packageName];
+    const notes = ALTERNATIVE_NOTES[packageName];
+    return { pros: [...notes.pros], cons: [...notes.cons] };
 }
 function recommendationFor(packageName, alternatives) {
     if (alternatives.length === 0)
