@@ -444,7 +444,13 @@ async function main() {
 export function cliEntryMatches(modulePath, entryPath) {
     try {
         const moduleReal = realpathSync(modulePath);
-        const entryReal = realpathSync(entryPath);
+        let entryReal;
+        try {
+            entryReal = realpathSync(entryPath);
+        }
+        catch {
+            entryReal = realpathSync(`${entryPath}.js`);
+        }
         if (statSync(entryReal).isDirectory()) {
             return moduleReal === realpathSync(join(entryReal, "index.js"));
         }

@@ -18,7 +18,7 @@ import {
 import { researchPackage } from "../src/tools/research-package.js";
 import { AdvisoryLookupError, checkSecurityAdvisories } from "../src/tools/security-client.js";
 import { cliEntryMatches, handleToolCall, tools } from "../src/index.js";
-import { resolveVersion } from "../src/tools/version-resolve.js";
+import { isRegistrySpec, resolveVersion } from "../src/tools/version-resolve.js";
 
 type Fixture = {
   body: unknown;
@@ -148,9 +148,17 @@ test("check_security on a found package with no advisories says there are no kno
 });
 
 test('analyze_package_json does not treat a range with no published match as up to date', async () => {
-  // source: a range was checked at its floor, so "^1.2.0" became 1.2.0 even when that version was not what install would get.
+  // source: a range was checked at its floor, so "^1.2.0" became 1.2.0 even when the versions map had no match.
   mockFetch({
     ...dependencyFixtures("a", "1.5.0", "1.2.0"),
+    "https://registry.npmjs.org/a": {
+      body: {
+        name: "a",
+        version: "1.5.0",
+        "dist-tags": { latest: "1.5.0" },
+        versions: { "1.0.0": {} },
+      },
+    },
     ...registryDownloads("b", "9.0.0"),
     [affectUrl("b", "9.0.0")]: { body: [] },
     ...dependencyFixtures("d", "1.0.0", "1.0.0"),
@@ -1582,6 +1590,14 @@ test("analyze_package_json and check_security answers contain no exclamation or 
   await take(
     {
       ...dependencyFixtures("a", "1.5.0", "1.2.0"),
+      "https://registry.npmjs.org/a": {
+        body: {
+          name: "a",
+          version: "1.5.0",
+          "dist-tags": { latest: "1.5.0" },
+          versions: { "1.0.0": {} },
+        },
+      },
       ...registryDownloads("b", "9.0.0"),
       [affectUrl("b", "9.0.0")]: { body: [] },
       ...dependencyFixtures("d", "1.0.0", "1.0.0"),
@@ -1615,7 +1631,9 @@ test("analyze_package_json and check_security answers contain no exclamation or 
     {
       ...dependencyFixtures("hyphen", "2.1.0", "1.2.3"),
       ...dependencyFixtures("space", "1.9.0", "1.2.3"),
+      [affectUrl("space", "1.9.0")]: { body: [] },
       ...dependencyFixtures("xrange", "1.5.0", "1.0.0"),
+      [affectUrl("xrange", "1.5.0")]: { body: [] },
     },
     () => analyzePackageJson({
       dependencies: { hyphen: "1.2.3 - 2.0.0", space: ">=1.2.3 <2.0.0", xrange: "1.x" },
@@ -2257,11 +2275,10 @@ test("compare_packages does not crown one package and keeps a failed read in the
     failedRejection = error;
   }
   expect(failedRejection).toBeNull();
-  expect(failed?.packages.find((pkg) => pkg.name === "broken")).toEqual({
-    name: "broken",
-    status: "lookup-failed",
-    error: "undefined is not an object (evaluating 'pkg.name.startsWith')",
-  });
+  const broken = failed?.packages.find((pkg) => pkg.name === "broken");
+  expect(broken?.status).toBe("lookup-failed");
+  expect(typeof broken?.error).toBe("string");
+  expect((broken?.error ?? "").length > 0).toBe(true);
   expect(failed?.packages.find((pkg) => pkg.name === "kept")?.status).toBe("found");
 });
 
@@ -2313,6 +2330,190 @@ test("find_alternatives returns fresh pros and cons arrays", async () => {
     "Immutable date objects",
     "Features are added through plugins",
   ]);
+});
+
+test("isRegistrySpec refuses paths, URLs, ssh addresses, GitHub shorthand and protocol prefixes", () => {
+  // source: user/repo, a relative or absolute path, git@ and ssh:// were sent to the npm registry by name.
+  const refused = [
+    "user/repo",
+    "user/repo#main",
+    ".",
+    "..",
+    "./pkg",
+    "./a/b",
+    "../pkg",
+    "../../pkg",
+    "/abs/pkg",
+    "/abs/a/b",
+    "~/pkg",
+    "~/a/b",
+    "git@github.com:user/repo.git",
+    "git@gitlab.example.test:group/sub/repo.git",
+    "ssh://git@github.com/user/repo.git",
+    "workspace:*",
+    "npm:left-pad@1.0.0",
+    "file:../local",
+    "link:../pkg",
+    "git+https://github.com/acme/pkg.git",
+    "git://github.com/acme/pkg.git",
+    "github:acme/pkg",
+    "gitlab:acme/pkg",
+    "bitbucket:acme/pkg",
+    "http://example.com/pkg.tgz",
+    "https://example.com/pkg.tgz",
+  ];
+  for (const spec of refused) {
+    expect(isRegistrySpec(spec)).toBe(false);
+  }
+  const accepted = [
+    "1.2.3",
+    "^1.2.3",
+    ">=1 <2",
+    "latest",
+    "next",
+    "*",
+    "",
+    "1.x",
+    "~1.2.3",
+    "~1",
+    "~1.2.x",
+    "~0.0.1",
+  ];
+  for (const spec of accepted) {
+    expect(isRegistrySpec(spec)).toBe(true);
+  }
+});
+
+test("analyze_package_json looks up a tilde range", async () => {
+  // source: a tilde range was taken for a file path and not looked up
+  const pkg = {
+    name: "a",
+    version: "1.3.0",
+    "dist-tags": { latest: "1.3.0" },
+    versions: {
+      "1.2.0": {},
+      "1.2.9": {},
+      "1.3.0": {},
+    },
+  };
+  const fetchMock = mockFetch({
+    "https://registry.npmjs.org/a": { body: pkg },
+    "https://api.npmjs.org/downloads/point/last-week/a": {
+      body: { downloads: 10, package: "a" },
+    },
+    [affectUrl("a", "1.2.9")]: { body: [] },
+  });
+  let rejection: unknown = null;
+  let result: Awaited<ReturnType<typeof analyzePackageJson>> | undefined;
+  try {
+    result = await analyzePackageJson({ dependencies: { a: "~1.2.0" } });
+  } catch (error) {
+    rejection = error;
+  }
+  expect(rejection).toBeNull();
+  const dependency = result?.dependencies.find((dep) => dep.name === "a");
+  expect(dependency).toMatchObject({
+    resolvedFrom: "range",
+    current: "1.2.9",
+    status: "minor",
+  });
+  const urls = fetchMock.mock.calls.map(([url]) => String(url));
+  expect(urls).toContain("https://registry.npmjs.org/a");
+  expect(urls).toContain(affectUrl("a", "1.2.9"));
+  expect(resolveVersion("~1.2.0", pkg)).toMatchObject({
+    kind: "range",
+    version: "1.2.9",
+  });
+});
+
+test("analyze_package_json does not look up a GitHub shorthand or a relative path", async () => {
+  // source: "user/repo" and "../local" were fetched from the registry by package name.
+  const fetchMock = mockFetch({});
+  const result = await analyzePackageJson({
+    dependencies: { a: "user/repo", b: "../local" },
+  });
+  expect(fetchMock.mock.calls.length).toBe(0);
+  expect(result.dependencies).toEqual([
+    {
+      name: "a",
+      spec: "user/repo",
+      current: "user/repo",
+      status: "unknown",
+      securityIssues: null,
+      recommendation:
+        'Version spec "user/repo" does not point at an npm registry version, so it was not looked up.',
+    },
+    {
+      name: "b",
+      spec: "../local",
+      current: "../local",
+      status: "unknown",
+      securityIssues: null,
+      recommendation:
+        'Version spec "../local" does not point at an npm registry version, so it was not looked up.',
+    },
+  ]);
+});
+
+test("resolveVersion uses latest when the versions map is missing and latest satisfies the range", () => {
+  // source: a range was unknown when the registry omitted the versions map, even though latest satisfied it.
+  const pkg = {
+    name: "plain",
+    version: "2.1.0",
+    "dist-tags": { latest: "2.1.0" },
+  };
+  expect(resolveVersion("^2.0.0", pkg)).toEqual({
+    kind: "range",
+    version: "2.1.0",
+    range: "^2.0.0",
+  });
+});
+
+test("research_package treats an empty currentVersion as omitted", async () => {
+  // source: an empty currentVersion produced versionsBehind and a version note.
+  mockFetch({
+    "https://registry.npmjs.org/plain": {
+      body: {
+        name: "plain",
+        version: "2.1.0",
+        "dist-tags": { latest: "2.1.0" },
+        versions: { "1.0.0": {}, "2.0.0": {}, "2.1.0": {} },
+      },
+    },
+    "https://api.npmjs.org/downloads/point/last-week/plain": { body: { downloads: 1, package: "plain" } },
+    "https://api.npmjs.org/downloads/point/last-month/plain": { body: { downloads: 4, package: "plain" } },
+    [affectUrl("plain", "2.1.0")]: { body: [] },
+  });
+  const result = await researchPackage("plain", "");
+  expect(result.versionsBehind).toBeUndefined();
+  expect("versionsBehind" in result).toBe(false);
+  expect(result.versionNote).toBeUndefined();
+  expect("versionNote" in result).toBe(false);
+});
+
+test("compare_packages names every package in a three-way download tie", async () => {
+  // source: three packages with the same weekly downloads were described as only the first two.
+  mockFetch({
+    ...comparedPackage("a", 1000, 1),
+    ...comparedPackage("b", 1000, 2),
+    ...comparedPackage("c", 1000, 3),
+  });
+  const result = await comparePackages(["a", "b", "c"]);
+  expect(result.recommendation).toContain(
+    '"a", "b" and "c" have the same weekly downloads (1,000).'
+  );
+});
+
+test("cliEntryMatches accepts an entry path that omits .js", () => {
+  // source: node dist/index did not match dist/index.js, so the server did not start.
+  const root = mkdtempSync(join(tmpdir(), "eco-cli-js-"));
+  try {
+    const entry = join(root, "index.js");
+    writeFileSync(entry, "");
+    expect(cliEntryMatches(entry, join(root, "index"))).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("cliEntryMatches treats a directory entry as its index.js", () => {

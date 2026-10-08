@@ -3,8 +3,30 @@
  */
 import semver from "semver";
 const NON_REGISTRY_PREFIX = /^(?:workspace:|npm:|file:|link:|git\+|git:|github:|gitlab:|bitbucket:|http:|https:)/i;
+function isNpmGitHubShorthand(spec) {
+    if (spec.startsWith("@") || /\s/.test(spec))
+        return false;
+    const slash = spec.indexOf("/");
+    return slash !== -1 && spec.indexOf("/", slash + 1) === -1;
+}
 export function isRegistrySpec(spec) {
-    return !NON_REGISTRY_PREFIX.test(spec);
+    if (NON_REGISTRY_PREFIX.test(spec))
+        return false;
+    if (spec === "." ||
+        spec === ".." ||
+        spec.startsWith("./") ||
+        spec.startsWith("../") ||
+        spec.startsWith("/") ||
+        spec.startsWith("~/")) {
+        return false;
+    }
+    if (spec.includes("://"))
+        return false;
+    if (spec.startsWith("git@"))
+        return false;
+    if (isNpmGitHubShorthand(spec))
+        return false;
+    return true;
 }
 export function versionResolutionSentence(resolved) {
     if (resolved.kind === "range") {
@@ -20,12 +42,15 @@ export function resolveVersion(spec, pkg) {
     if (exact)
         return { kind: "exact", version: exact };
     if (semver.validRange(spec) !== null) {
-        const published = Object.keys(pkg.versions ?? {});
+        const versionMap = pkg.versions;
+        const published = Object.keys(versionMap ?? {});
         const taggedLatest = pkg["dist-tags"]?.latest;
         const latest = typeof taggedLatest === "string" && taggedLatest.length > 0 ? taggedLatest : pkg.version;
-        if (semver.valid(latest) &&
-            Object.hasOwn(pkg.versions ?? {}, latest) &&
-            semver.satisfies(latest, spec)) {
+        const versionsMissingOrEmpty = versionMap == null || published.length === 0;
+        const latestIsListed = versionMap != null && Object.hasOwn(versionMap, latest);
+        if (semver.valid(latest) !== null &&
+            semver.satisfies(latest, spec) &&
+            (versionsMissingOrEmpty || latestIsListed)) {
             return { kind: "range", version: latest, range: spec };
         }
         const match = semver.maxSatisfying(published, spec);

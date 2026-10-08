@@ -21,7 +21,10 @@ function metricSentence(entries, key, noun) {
     const leaders = withValue.filter((entry) => entry[key] === max);
     const formatted = formatCount(max);
     if (leaders.length >= 2) {
-        return `"${leaders[0].name}" and "${leaders[1].name}" have the same ${noun} (${formatted}).`;
+        const names = leaders.map((entry) => `"${entry.name}"`);
+        const last = names[names.length - 1];
+        const head = names.slice(0, -1).join(", ");
+        return `${head} and ${last} have the same ${noun} (${formatted}).`;
     }
     return `"${leaders[0].name}" has the most ${noun} (${formatted}).`;
 }
