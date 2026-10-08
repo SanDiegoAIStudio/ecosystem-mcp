@@ -4,59 +4,95 @@
  * Find alternative packages to a given package.
  */
 
-import { fetchPackageData, fetchDownloads } from "./npm-client.js";
+import { fetchDownloads, fetchPackageData, NpmLookupError, repositoryUrl } from "./npm-client.js";
 import { fetchRepoFromNpmUrl } from "./github-client.js";
 
-// Known alternatives mapping (curated list)
 const ALTERNATIVES_MAP: Record<string, string[]> = {
-  // Date/Time
   moment: ["date-fns", "dayjs", "luxon"],
   "date-fns": ["dayjs", "luxon", "moment"],
   dayjs: ["date-fns", "luxon", "moment"],
 
-  // HTTP Clients
   axios: ["ky", "got", "node-fetch", "undici"],
   "node-fetch": ["undici", "axios", "ky", "got"],
   got: ["axios", "ky", "undici"],
   request: ["axios", "got", "node-fetch"],
 
-  // State Management
-  redux: ["zustand", "jotai", "recoil", "mobx", "valtio"],
+  redux: ["zustand", "jotai", "mobx", "valtio"],
   mobx: ["zustand", "redux", "jotai", "valtio"],
   zustand: ["jotai", "valtio", "redux"],
 
-  // Validation
   joi: ["zod", "yup", "valibot", "ajv"],
   yup: ["zod", "joi", "valibot", "ajv"],
   zod: ["valibot", "yup", "joi", "ajv"],
 
-  // Testing
   jest: ["vitest", "mocha", "ava"],
   mocha: ["vitest", "jest", "ava"],
   chai: ["vitest", "jest"],
 
-  // Bundlers
   webpack: ["vite", "esbuild", "rollup", "parcel"],
   rollup: ["vite", "esbuild", "webpack"],
   parcel: ["vite", "webpack", "esbuild"],
 
-  // CSS Frameworks
-  bootstrap: ["tailwindcss", "bulma", "foundation"],
+  bootstrap: ["tailwindcss", "bulma", "foundation-sites"],
   tailwindcss: ["unocss", "bootstrap"],
 
-  // ORM
   sequelize: ["prisma", "drizzle-orm", "typeorm", "knex"],
   typeorm: ["prisma", "drizzle-orm", "sequelize"],
   prisma: ["drizzle-orm", "typeorm", "sequelize"],
 
-  // Lodash
   lodash: ["radash", "remeda", "rambda"],
   underscore: ["lodash", "radash"],
 
-  // Express alternatives
-  express: ["fastify", "koa", "hono", "hapi"],
+  express: ["fastify", "koa", "hono", "@hapi/hapi"],
   koa: ["fastify", "express", "hono"],
 };
+
+const ALTERNATIVE_NOTES: Record<string, { pros: string[]; cons: string[] }> = {
+  "date-fns": {
+    pros: ["Functions are imported one at a time", "Works on native Date objects", "Written in TypeScript"],
+    cons: ["No chainable API"],
+  },
+  dayjs: {
+    pros: ["API modeled on Moment", "Immutable date objects", "Features are added through plugins"],
+    cons: ["Time zones and several formats need plugins"],
+  },
+  zod: {
+    pros: ["Written in TypeScript", "Static types are inferred from schemas"],
+    cons: ["Validation runs at runtime and adds to bundle size"],
+  },
+  valibot: {
+    pros: ["Each validator is a separate import", "Written in TypeScript"],
+    cons: ["Newer, with fewer third-party integrations"],
+  },
+  vitest: {
+    pros: ["Shares Vite's config and plugins", "ES modules work without extra setup", "Jest-style describe, it and expect"],
+    cons: ["Newer than Jest", "Some Jest plugins do not work with it"],
+  },
+  zustand: {
+    pros: ["Stores are plain hooks", "No provider component needed", "Written in TypeScript"],
+    cons: ["Smaller ecosystem than Redux", "No enforced store structure"],
+  },
+  prisma: {
+    pros: ["Generated, typed query client", "Built-in migrations", "Prisma Studio data browser"],
+    cons: ["Needs a code generation step", "Schema is written in Prisma's own language"],
+  },
+  "drizzle-orm": {
+    pros: ["Queries read like SQL", "Schema is plain TypeScript with no code generation step"],
+    cons: ["Newer, with less documentation than older ORMs"],
+  },
+  vite: {
+    pros: ["Dev server serves native ES modules", "Hot module replacement", "Works with little configuration"],
+    cons: ["Config and plugins differ from Webpack's", "Some Webpack plugins have no equivalent"],
+  },
+  fastify: {
+    pros: ["JSON schema validation built in", "Plugin system", "Built-in logging"],
+    cons: ["Middleware pattern differs from Express", "Express middleware needs an adapter plugin"],
+  },
+};
+
+export function alternativeNotes(): Record<string, { pros: string[]; cons: string[] }> {
+  return ALTERNATIVE_NOTES;
+}
 
 export interface Alternative {
   name: string;
@@ -70,13 +106,12 @@ export interface Alternative {
 
 export interface AlternativesResult {
   original: string;
-  category?: string;
   alternatives: Alternative[];
+  notLoaded: Array<{ name: string; reason: string }>;
   recommendation?: string;
 }
 
 function getMigrationEffort(from: string, to: string): "low" | "medium" | "high" {
-  // Rough estimates based on API similarity
   const lowEffort = [
     ["moment", "dayjs"],
     ["axios", "ky"],
@@ -91,14 +126,17 @@ function getMigrationEffort(from: string, to: string): "low" | "medium" | "high"
     ["express", "fastify"],
   ];
 
+  const left = from.toLowerCase();
+  const right = to.toLowerCase();
+
   for (const [a, b] of lowEffort) {
-    if ((from === a && to === b) || (from === b && to === a)) {
+    if ((left === a && right === b) || (left === b && right === a)) {
       return "low";
     }
   }
 
   for (const [a, b] of highEffort) {
-    if ((from === a && to === b) || (from === b && to === a)) {
+    if ((left === a && right === b) || (left === b && right === a)) {
       return "high";
     }
   }
@@ -107,119 +145,88 @@ function getMigrationEffort(from: string, to: string): "low" | "medium" | "high"
 }
 
 function getProsAndCons(packageName: string): { pros: string[]; cons: string[] } {
-  const info: Record<string, { pros: string[]; cons: string[] }> = {
-    "date-fns": {
-      pros: ["Tree-shakeable", "Pure functions", "TypeScript native"],
-      cons: ["More verbose than dayjs", "No chainable API"],
-    },
-    dayjs: {
-      pros: ["Moment-compatible API", "Tiny size (2KB)", "Plugin system"],
-      cons: ["Mutable by default", "Fewer locales"],
-    },
-    zod: {
-      pros: ["TypeScript-first", "Great inference", "Active development"],
-      cons: ["Runtime overhead", "Bundle size"],
-    },
-    valibot: {
-      pros: ["Smallest bundle", "Modular design", "Fast"],
-      cons: ["Newer ecosystem", "Fewer utilities"],
-    },
-    vitest: {
-      pros: ["Vite-native", "ESM first", "Fast", "Jest compatible"],
-      cons: ["Newer than Jest", "Some Jest plugins incompatible"],
-    },
-    zustand: {
-      pros: ["Tiny (1KB)", "No boilerplate", "TypeScript native"],
-      cons: ["Less ecosystem than Redux", "Different patterns"],
-    },
-    prisma: {
-      pros: ["Type-safe queries", "Migrations", "Studio GUI"],
-      cons: ["Cold starts", "Query engine overhead"],
-    },
-    "drizzle-orm": {
-      pros: ["SQL-like syntax", "No codegen", "Edge ready", "Lightweight"],
-      cons: ["Newer ecosystem", "Less documentation"],
-    },
-    vite: {
-      pros: ["Lightning fast HMR", "ESM native", "Simple config"],
-      cons: ["Different from Webpack patterns", "Some plugins incompatible"],
-    },
-    fastify: {
-      pros: ["High performance", "Schema validation", "Plugin system"],
-      cons: ["Different middleware pattern", "Learning curve from Express"],
-    },
-  };
-
-  return info[packageName] || { pros: ["Popular choice"], cons: ["Evaluate fit for your use case"] };
+  if (!Object.hasOwn(ALTERNATIVE_NOTES, packageName)) {
+    return { pros: [], cons: [] };
+  }
+  return ALTERNATIVE_NOTES[packageName];
 }
 
-export async function findAlternatives(
-  packageName: string,
-  _category?: string
-): Promise<AlternativesResult> {
-  // Get known alternatives
-  const knownAlternatives = ALTERNATIVES_MAP[packageName.toLowerCase()] || [];
+function recommendationFor(packageName: string, alternatives: Alternative[]): string | undefined {
+  if (alternatives.length === 0) return undefined;
+  const top = alternatives[0];
+  if (typeof top.weeklyDownloads !== "number") {
+    return "Weekly downloads were not available, so the alternatives are in curated order.";
+  }
+  let text = `"${top.name}" has the most weekly downloads of these (${top.weeklyDownloads.toLocaleString("en-US")}).`;
+  const lowEffort = alternatives.find(
+    (item) => item !== top && item.migrationEffort === "low"
+  );
+  if (lowEffort) {
+    text += ` "${lowEffort.name}" is rated low migration effort from "${packageName}".`;
+  }
+  return text;
+}
+
+export async function findAlternatives(packageName: string): Promise<AlternativesResult> {
+  const packageKey = packageName.toLowerCase();
+  const knownAlternatives = Object.hasOwn(ALTERNATIVES_MAP, packageKey)
+    ? ALTERNATIVES_MAP[packageKey]
+    : [];
 
   if (knownAlternatives.length === 0) {
     return {
       original: packageName,
       alternatives: [],
+      notLoaded: [],
       recommendation: `No curated alternatives found for "${packageName}". Consider searching npm for similar packages.`,
     };
   }
 
-  // Fetch data for alternatives
-  const alternatives = await Promise.all(
-    knownAlternatives.slice(0, 4).map(async (altName) => {
-      const [npmData, downloads] = await Promise.all([
-        fetchPackageData(altName),
-        fetchDownloads(altName, "last-week"),
-      ]);
-
-      if (!npmData) {
-        return null;
+  const loaded = await Promise.all(
+    knownAlternatives.map(async (altName) => {
+      try {
+        const npmData = await fetchPackageData(altName);
+        if (!npmData) return { name: altName, reason: "not found on npm" };
+        const downloads = await fetchDownloads(altName, "last-week");
+        const githubData = await fetchRepoFromNpmUrl(repositoryUrl(npmData.repository));
+        const { pros, cons } = getProsAndCons(altName);
+        const alternative: Alternative = {
+          name: altName,
+          ...(npmData.description ? { description: npmData.description } : {}),
+          ...(typeof downloads?.downloads === "number" ? { weeklyDownloads: downloads.downloads } : {}),
+          ...(typeof githubData?.stargazers_count === "number"
+            ? { githubStars: githubData.stargazers_count }
+            : {}),
+          pros,
+          cons,
+          migrationEffort: getMigrationEffort(packageName, altName),
+        };
+        return alternative;
+      } catch (error) {
+        if (error instanceof NpmLookupError) return { name: altName, reason: error.message };
+        const reason = error instanceof Error ? error.message : String(error);
+        return { name: altName, reason };
       }
-
-      const githubData = await fetchRepoFromNpmUrl(npmData.repository?.url);
-      const { pros, cons } = getProsAndCons(altName);
-
-      return {
-        name: altName,
-        description: npmData.description,
-        weeklyDownloads: downloads?.downloads,
-        githubStars: githubData?.stargazers_count,
-        pros,
-        cons,
-        migrationEffort: getMigrationEffort(packageName, altName),
-      };
     })
   );
 
-  const validAlternatives: Alternative[] = alternatives.filter(
-    (a): a is NonNullable<typeof a> => a !== null
-  );
-
-  // Sort by popularity
-  validAlternatives.sort(
-    (a, b) => (b.weeklyDownloads || 0) - (a.weeklyDownloads || 0)
-  );
-
-  // Generate recommendation
-  let recommendation: string | undefined;
-  if (validAlternatives.length > 0) {
-    const top = validAlternatives[0];
-    const lowEffort = validAlternatives.find((a) => a.migrationEffort === "low");
-
-    if (lowEffort && lowEffort !== top) {
-      recommendation = `"${top.name}" is most popular, but "${lowEffort.name}" offers the easiest migration from "${packageName}".`;
-    } else {
-      recommendation = `Consider "${top.name}" - ${top.weeklyDownloads?.toLocaleString()} weekly downloads.`;
-    }
+  const alternatives: Alternative[] = [];
+  const notLoaded: Array<{ name: string; reason: string }> = [];
+  for (const entry of loaded) {
+    if ("reason" in entry) notLoaded.push({ name: entry.name, reason: entry.reason });
+    else alternatives.push(entry);
   }
 
+  const withCounts = alternatives.filter((item) => typeof item.weeklyDownloads === "number");
+  const withoutCounts = alternatives.filter((item) => typeof item.weeklyDownloads !== "number");
+  withCounts.sort((a, b) => (b.weeklyDownloads ?? 0) - (a.weeklyDownloads ?? 0));
+  const ordered = [...withCounts, ...withoutCounts];
+
+  const recommendation = recommendationFor(packageName, ordered);
   return {
     original: packageName,
-    alternatives: validAlternatives,
-    recommendation,
+    alternatives: ordered,
+    notLoaded,
+    ...(recommendation ? { recommendation } : {}),
   };
 }

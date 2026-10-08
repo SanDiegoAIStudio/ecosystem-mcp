@@ -1,7 +1,7 @@
 /**
  * Security Advisory Client
  *
- * Checks for security vulnerabilities using npm audit API and GitHub advisories.
+ * Checks for security vulnerabilities using the GitHub Security Advisories API.
  */
 const GITHUB_ADVISORY_API = "https://api.github.com/advisories";
 export class AdvisoryLookupError extends Error {
@@ -37,12 +37,20 @@ export async function checkSecurityAdvisories(packageName, version) {
         if (token) {
             headers["Authorization"] = `Bearer ${token}`;
         }
-        const affects = version ? `${packageName}@${version}` : packageName;
+        const affects = `${packageName}@${version}`;
         let url = `${GITHUB_ADVISORY_API}?ecosystem=npm&per_page=100&affects=${encodeURIComponent(affects)}`;
+        const requestInit = {
+            headers,
+            signal: AbortSignal.timeout(15_000),
+        };
         for (let page = 0; url && page < 10; page++) {
-            const response = await fetch(url, { headers });
+            const response = await fetch(url, requestInit);
             if (!response.ok) {
-                throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`);
+                const base = `GitHub advisory lookup failed for ${packageName}: HTTP ${response.status}`;
+                const rateLimited = response.status === 403 || response.status === 429;
+                throw new AdvisoryLookupError(rateLimited
+                    ? `${base}. GitHub's rate limit may be used up. Set GITHUB_TOKEN to raise it.`
+                    : base);
             }
             const data = await response.json().catch(() => null);
             if (!Array.isArray(data)) {
@@ -70,6 +78,9 @@ export async function checkSecurityAdvisories(packageName, version) {
                 ?.match(/<([^>]+)>/)?.[1];
             if (!url?.startsWith("https://api.github.com/"))
                 url = undefined;
+        }
+        if (url) {
+            throw new AdvisoryLookupError(`GitHub advisory lookup failed for ${packageName}: more than 1,000 advisories, so the list is incomplete`);
         }
     }
     catch (error) {

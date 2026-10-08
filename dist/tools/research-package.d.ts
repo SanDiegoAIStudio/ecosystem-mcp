@@ -19,9 +19,10 @@ export interface PackageResearch {
         archived: boolean;
     };
     security: {
-        advisoryCount: number;
-        criticalCount: number;
-        highCount: number;
+        checkedVersion: string;
+        advisoryCount: number | null;
+        criticalCount: number | null;
+        highCount: number | null;
         error?: string;
         advisories: Array<{
             id: string;
@@ -38,5 +39,7 @@ export interface PackageResearch {
     license?: string;
     homepage?: string;
     keywords?: string[];
+    deprecated?: string;
+    versionNote?: string;
 }
 export declare function researchPackage(packageName: string, currentVersion?: string): Promise<PackageResearch>;

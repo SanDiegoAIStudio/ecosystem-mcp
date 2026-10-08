@@ -5,8 +5,7 @@
  * Deep conducts agentic research: it reasons about intent, spawns parallel
  * search agents, and synthesizes results with field-level citations.
  *
- * Use Deep when you need *research*, not just search results.
- * Use standard Exa search when you know exactly what you're looking for.
+ * Use Deep for multi-step research with citations; use standard Exa search for direct lookups.
  *
  * API: POST https://api.exa.ai/search with type: "deep" | "deep-reasoning"
  *
@@ -161,6 +160,7 @@ export class ExaDeepClient {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(request),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {
@@ -175,6 +175,7 @@ export class ExaDeepClient {
   async getResearchTask(researchId: string): Promise<ExaResearchTaskStatus> {
     const response = await fetch(`${this.baseUrl}/research/v1/${researchId}`, {
       headers: { "x-api-key": this.apiKey },
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!response.ok) {

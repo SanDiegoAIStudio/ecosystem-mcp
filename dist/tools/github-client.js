@@ -4,15 +4,51 @@
  * Fetches repository data from GitHub.
  */
 const GITHUB_API = "https://api.github.com";
+const REQUEST_TIMEOUT_MS = 15_000;
+function ownerAndRepo(path, bare) {
+    const clean = path.split(/[?#]/)[0];
+    const parts = clean.split("/").filter((part) => part.length > 0);
+    if (bare ? parts.length !== 2 : parts.length < 2)
+        return null;
+    const owner = parts[0];
+    let repo = parts[1];
+    if (repo.endsWith(".git"))
+        repo = repo.slice(0, -4);
+    if (!/^[\w-]+$/.test(owner) || !/^[\w.-]+$/.test(repo))
+        return null;
+    return { owner, repo };
+}
+export function parseGitHubRepo(url) {
+    const text = url.trim();
+    if (!text)
+        return null;
+    if (/^github:/i.test(text)) {
+        return ownerAndRepo(text.slice("github:".length), false);
+    }
+    if (/^[A-Za-z][\w+.-]*:(?!\/\/)/.test(text))
+        return null;
+    const scp = text.match(/^git@github\.com:(.+)$/i);
+    if (scp)
+        return ownerAndRepo(scp[1], false);
+    const asUrl = text.match(/^[A-Za-z][\w+.-]*:\/\/([^/?#]+)([^?#]*)(?:[?#].*)?$/);
+    if (asUrl) {
+        const host = asUrl[1].replace(/^.*@/, "").replace(/:\d+$/, "").toLowerCase();
+        if (host !== "github.com" && host !== "www.github.com")
+            return null;
+        return ownerAndRepo(asUrl[2].replace(/^\//, ""), false);
+    }
+    const hostPath = text.match(/^(?:www\.)?github\.com[/:]([^?#]*)/i);
+    if (hostPath)
+        return ownerAndRepo(hostPath[1], false);
+    return ownerAndRepo(text, true);
+}
 export async function fetchRepoFromNpmUrl(repoUrl) {
     if (!repoUrl)
         return null;
-    // Parse GitHub URL from various formats
-    const match = repoUrl.match(/github\.com[/:]([\w-]+)\/([\w.-]+?)(?:\.git)?(?:\/|$)/i);
-    if (!match)
+    const parsed = parseGitHubRepo(repoUrl);
+    if (!parsed)
         return null;
-    const [, owner, repo] = match;
-    return fetchRepo(owner, repo);
+    return fetchRepo(parsed.owner, parsed.repo);
 }
 export async function fetchRepo(owner, repo) {
     try {
@@ -27,6 +63,7 @@ export async function fetchRepo(owner, repo) {
         }
         const response = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, {
             headers,
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
         if (!response.ok) {
             if (response.status === 404)

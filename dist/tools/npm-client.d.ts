@@ -10,10 +10,12 @@ export interface NpmPackageData {
     license?: string;
     homepage?: string;
     repository?: {
-        type: string;
-        url: string;
-    };
+        type?: string;
+        url?: string;
+    } | string;
     keywords?: string[];
+    types?: string;
+    typings?: string;
     maintainers?: Array<{
         name: string;
         email: string;
@@ -28,5 +30,11 @@ export interface NpmDownloads {
     end: string;
     package: string;
 }
+export declare function repositoryUrl(repository: NpmPackageData["repository"]): string | undefined;
+export declare class NpmLookupError extends Error {
+    constructor(message: string);
+}
+export declare function hasTypeScriptSupport(pkg: NpmPackageData): boolean;
+export declare function deprecationMessage(pkg: NpmPackageData): string | undefined;
 export declare function fetchPackageData(packageName: string): Promise<NpmPackageData | null>;
 export declare function fetchDownloads(packageName: string, period?: "last-week" | "last-month" | "last-year"): Promise<NpmDownloads | null>;

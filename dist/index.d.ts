@@ -15,4 +15,19 @@
  * - exa_research: Longer research task through the Exa Research API
  * - get_trending: Get trending packages in a category
  */
+import { Tool } from "@modelcontextprotocol/sdk/types.js";
+export declare const tools: Tool[];
+interface ToolTextResult {
+    content: Array<{
+        type: "text";
+        text: string;
+    }>;
+    isError?: boolean;
+}
+export declare function handleToolCall(request: {
+    params: {
+        name: string;
+        arguments?: unknown;
+    };
+}): Promise<ToolTextResult>;
 export {};
