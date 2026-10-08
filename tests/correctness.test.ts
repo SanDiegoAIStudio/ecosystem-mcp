@@ -2337,6 +2337,9 @@ test("isRegistrySpec refuses paths, URLs, ssh addresses, GitHub shorthand and pr
   const refused = [
     "user/repo",
     "user/repo#main",
+    "user/repo#feature/x",
+    "user/repo#semver:^1.0.0",
+    "user/repo#v1.2.3",
     ".",
     "..",
     "./pkg",
@@ -2367,6 +2370,7 @@ test("isRegistrySpec refuses paths, URLs, ssh addresses, GitHub shorthand and pr
   }
   const accepted = [
     "1.2.3",
+    "1.0.0 - 2.0.0",
     "^1.2.3",
     ">=1 <2",
     "latest",
@@ -2426,6 +2430,20 @@ test("analyze_package_json looks up a tilde range", async () => {
   });
 });
 
+test("analyze_package_json does not look up a GitHub shorthand with a slash in the branch", async () => {
+  // source: a GitHub shorthand with a slash in its branch name was sent to the registry
+  const fetchMock = mockFetch({});
+  const result = await analyzePackageJson({
+    dependencies: { a: "user/repo#feature/x" },
+  });
+  expect(fetchMock.mock.calls.length).toBe(0);
+  const dependency = result.dependencies.find((dep) => dep.name === "a");
+  expect(dependency?.status).toBe("unknown");
+  expect(dependency?.recommendation).toBe(
+    'Version spec "user/repo#feature/x" does not point at an npm registry version, so it was not looked up.'
+  );
+});
+
 test("analyze_package_json does not look up a GitHub shorthand or a relative path", async () => {
   // source: "user/repo" and "../local" were fetched from the registry by package name.
   const fetchMock = mockFetch({});
@@ -2467,6 +2485,28 @@ test("resolveVersion uses latest when the versions map is missing and latest sat
     version: "2.1.0",
     range: "^2.0.0",
   });
+});
+
+test("research_package treats a whitespace currentVersion as omitted", async () => {
+  // source: a currentVersion of only whitespace produced versionsBehind and a version note.
+  mockFetch({
+    "https://registry.npmjs.org/plain": {
+      body: {
+        name: "plain",
+        version: "2.1.0",
+        "dist-tags": { latest: "2.1.0" },
+        versions: { "1.0.0": {}, "2.0.0": {}, "2.1.0": {} },
+      },
+    },
+    "https://api.npmjs.org/downloads/point/last-week/plain": { body: { downloads: 1, package: "plain" } },
+    "https://api.npmjs.org/downloads/point/last-month/plain": { body: { downloads: 4, package: "plain" } },
+    [affectUrl("plain", "2.1.0")]: { body: [] },
+  });
+  const result = await researchPackage("plain", "   ");
+  expect(result.versionsBehind).toBeUndefined();
+  expect("versionsBehind" in result).toBe(false);
+  expect(result.versionNote).toBeUndefined();
+  expect("versionNote" in result).toBe(false);
 });
 
 test("research_package treats an empty currentVersion as omitted", async () => {

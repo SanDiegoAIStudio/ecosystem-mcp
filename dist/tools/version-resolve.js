@@ -4,10 +4,12 @@
 import semver from "semver";
 const NON_REGISTRY_PREFIX = /^(?:workspace:|npm:|file:|link:|git\+|git:|github:|gitlab:|bitbucket:|http:|https:)/i;
 function isNpmGitHubShorthand(spec) {
-    if (spec.startsWith("@") || /\s/.test(spec))
+    const hash = spec.indexOf("#");
+    const head = hash === -1 ? spec : spec.slice(0, hash);
+    if (head.startsWith("@") || /\s/.test(head))
         return false;
-    const slash = spec.indexOf("/");
-    return slash !== -1 && spec.indexOf("/", slash + 1) === -1;
+    const slash = head.indexOf("/");
+    return slash > 0 && slash < head.length - 1 && head.indexOf("/", slash + 1) === -1;
 }
 export function isRegistrySpec(spec) {
     if (NON_REGISTRY_PREFIX.test(spec))

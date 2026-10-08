@@ -16,9 +16,11 @@ export type ResolvedVersion =
   | { kind: "none"; reason: string };
 
 function isNpmGitHubShorthand(spec: string): boolean {
-  if (spec.startsWith("@") || /\s/.test(spec)) return false;
-  const slash = spec.indexOf("/");
-  return slash !== -1 && spec.indexOf("/", slash + 1) === -1;
+  const hash = spec.indexOf("#");
+  const head = hash === -1 ? spec : spec.slice(0, hash);
+  if (head.startsWith("@") || /\s/.test(head)) return false;
+  const slash = head.indexOf("/");
+  return slash > 0 && slash < head.length - 1 && head.indexOf("/", slash + 1) === -1;
 }
 
 export function isRegistrySpec(spec: string): boolean {

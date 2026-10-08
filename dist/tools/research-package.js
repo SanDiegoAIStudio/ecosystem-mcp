@@ -28,7 +28,7 @@ export async function researchPackage(packageName, currentVersion) {
     let checkedVersion = npmData.version;
     let versionNote;
     let versionsBehind;
-    if (currentVersion === undefined || currentVersion === "") {
+    if (currentVersion === undefined || currentVersion.trim() === "") {
         const resolved = resolveVersion(undefined, npmData);
         if (resolved.kind !== "none")
             checkedVersion = resolved.version;
