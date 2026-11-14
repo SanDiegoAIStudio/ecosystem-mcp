@@ -83,6 +83,37 @@ Or run the inspector for testing:
 bunx @modelcontextprotocol/inspector node dist/index.js
 ```
 
+## Example
+
+From a fresh clone, `bun install` installed 102 packages, `bun run build` ran `tsc` with no errors, and `bun test` printed `96 pass, 0 fail`. `bun run dev` prints `Ecosystem MCP server running on stdio` and waits for a client.
+
+With the server in a project's `.mcp.json` as shown above, and no keys set, this question went to Claude Code:
+
+```bash
+claude -p "I use moment 2.29.4 in a small app. Should I replace it, and with what? Use the ecosystem-mcp tools and keep the answer under 150 words."
+```
+
+It called the tools and answered in about 15 seconds (trimmed):
+
+```
+Yes, replace it. Use dayjs.
+
+Right now: the tools show one moderate advisory against 2.29.4 (GHSA-4p3w-j4w9-5jqw, path traversal through a crafted locale name). Version 2.31.0 is the latest and has no known advisories.
+
+Alternatives:
+- dayjs (about 108M weekly downloads, 48.6k stars): about 2KB, immutable, and its API is modeled on moment, so migration effort is rated low. Time zones and some formats need plugins.
+- date-fns (about 118M/week): you import only the functions you use, it works on native Date, and it's written in TypeScript. There's no chainable API, so migration effort is medium.
+- luxon: a good fit if you rely heavily on time zones or Intl. Migration effort is medium.
+```
+
+The numbers come from the tools. `check_security` with `{"package":"moment","version":"2.29.4"}` returns `"totalAdvisories": 1`, that advisory with `"vulnerableVersions": ">= 2.29.2, < 2.31.0"`, and `"latestVersion": "2.31.0"`. `find_alternatives` with `{"package":"moment"}` returns date-fns, dayjs and luxon with their downloads and stars, and ends:
+
+```
+"recommendation": "\"date-fns\" has the most weekly downloads of these (117,767,478). \"dayjs\" is rated low migration effort from \"moment\"."
+```
+
+Without `EXA_API_KEY`, `exa_deep_search` answers `Error: EXA_API_KEY required for Exa Deep client` and the six package tools keep working. Download counts, stars and advisories change daily, so your numbers will differ.
+
 ## Tests
 
 ```bash
